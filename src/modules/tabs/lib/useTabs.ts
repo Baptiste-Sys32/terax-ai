@@ -27,6 +27,13 @@ export type TerminalTab = {
   private?: boolean;
 };
 
+export type CodexTab = {
+  id: number;
+  kind: "codex";
+  title: string;
+  cwd?: string;
+};
+
 export type EditorTab = {
   id: number;
   kind: "editor";
@@ -102,6 +109,7 @@ export type GitCommitFileDiffTab = {
 
 export type Tab =
   | TerminalTab
+  | CodexTab
   | EditorTab
   | PreviewTab
   | MarkdownTab
@@ -193,6 +201,21 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     },
     [],
   );
+
+  const newCodexTab = useCallback((cwd?: string) => {
+    const tabId = nextIdRef.current++;
+    setTabs((t) => [
+      ...t,
+      {
+        id: tabId,
+        kind: "codex",
+        title: "Codex",
+        cwd,
+      },
+    ]);
+    setActiveId(tabId);
+    return tabId;
+  }, []);
 
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
@@ -587,6 +610,13 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             ...(patch.cwd !== undefined && { cwd: patch.cwd }),
           };
         }
+        if (x.kind === "codex") {
+          return {
+            ...x,
+            ...(patch.title !== undefined && { title: patch.title }),
+            ...(patch.cwd !== undefined && { cwd: patch.cwd }),
+          };
+        }
         if (x.kind === "preview") {
           return {
             ...x,
@@ -800,6 +830,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     setActiveId,
     newTab,
     newAgentTab,
+    newCodexTab,
     newPrivateTab,
     openFileTab,
     pinTab,

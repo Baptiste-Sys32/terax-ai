@@ -8,8 +8,7 @@ import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 function iconFor(agent: string): IconSvgElement {
   const a = agent.toLowerCase();
   if (a.includes("claude")) return ClaudeIcon;
-  if (a.includes("codex") || a.includes("gpt") || a.includes("openai"))
-    return ChatGptIcon;
+  if (a.includes("gpt") || a.includes("openai")) return ChatGptIcon;
   return RoboticIcon;
 }
 
@@ -26,6 +25,18 @@ export function AgentIcon({
     return (
       <img
         src="/logo.png"
+        alt=""
+        width={size}
+        height={size}
+        className={className}
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+  if (agent.toLowerCase().includes("codex")) {
+    return (
+      <img
+        src="/codex_dark.svg"
         alt=""
         width={size}
         height={size}

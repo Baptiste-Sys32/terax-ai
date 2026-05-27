@@ -1,6 +1,7 @@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { WindowControls } from "@/components/WindowControls";
 import { IS_MAC, USE_CUSTOM_WINDOW_CONTROLS } from "@/lib/platform";
+import { CodexLogo } from "@/modules/codex/components/CodexLogo";
 import type { SettingsTab } from "@/modules/settings/openSettingsWindow";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import {
@@ -13,22 +14,24 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { JSX, useEffect, useState } from "react";
+import { JSX, type ReactNode, useEffect, useState } from "react";
 import { AboutSection } from "./sections/AboutSection";
 import { AgentsSection } from "./sections/AgentsSection";
+import { CodexSection } from "./sections/CodexSection";
 import { GeneralSection } from "./sections/GeneralSection";
 import { ModelsSection } from "./sections/ModelsSection";
 import { ShortcutsSection } from "./sections/ShortcutsSection";
 import { ThemesSection } from "./sections/ThemesSection";
 
-const TABS: { id: SettingsTab; label: string; icon: typeof Settings01Icon, component: () => JSX.Element }[] =
+const TABS: { id: SettingsTab; label: string; icon: () => ReactNode, component: () => JSX.Element }[] =
   [
-    { id: "general", label: "General", icon: Settings01Icon, component: GeneralSection },
-    { id: "themes", label: "Themes", icon: PaintBoardIcon, component: ThemesSection },
-    { id: "shortcuts", label: "Shortcuts", icon: KeyboardIcon, component: ShortcutsSection },
-    { id: "models", label: "Models", icon: AiScanIcon, component: ModelsSection },
-    { id: "agents", label: "Agents", icon: UserMultiple02Icon, component: AgentsSection },
-    { id: "about", label: "About", icon: InformationCircleIcon, component: AboutSection },
+    { id: "general", label: "General", icon: () => <HugeiconsIcon icon={Settings01Icon} size={12} strokeWidth={1.75} />, component: GeneralSection },
+    { id: "themes", label: "Themes", icon: () => <HugeiconsIcon icon={PaintBoardIcon} size={12} strokeWidth={1.75} />, component: ThemesSection },
+    { id: "shortcuts", label: "Shortcuts", icon: () => <HugeiconsIcon icon={KeyboardIcon} size={12} strokeWidth={1.75} />, component: ShortcutsSection },
+    { id: "models", label: "Models", icon: () => <HugeiconsIcon icon={AiScanIcon} size={12} strokeWidth={1.75} />, component: ModelsSection },
+    { id: "codex", label: "Codex", icon: () => <CodexLogo size={12} />, component: CodexSection },
+    { id: "agents", label: "Agents", icon: () => <HugeiconsIcon icon={UserMultiple02Icon} size={12} strokeWidth={1.75} />, component: AgentsSection },
+    { id: "about", label: "About", icon: () => <HugeiconsIcon icon={InformationCircleIcon} size={12} strokeWidth={1.75} />, component: AboutSection },
   ];
 
 const VALID_TABS: SettingsTab[] = [
@@ -36,6 +39,7 @@ const VALID_TABS: SettingsTab[] = [
   "themes",
   "shortcuts",
   "models",
+  "codex",
   "agents",
   "about",
 ];
@@ -99,7 +103,7 @@ export function SettingsApp() {
                 value={t.id}
                 className="h-6 gap-1.5 px-2.5 text-[11.5px]"
               >
-                <HugeiconsIcon icon={t.icon} size={12} strokeWidth={1.75} />
+                {t.icon()}
                 <span>{t.label}</span>
               </TabsTrigger>
             ))}
