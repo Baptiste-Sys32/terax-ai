@@ -11,6 +11,18 @@ node_modules
 dist
 dist-ssr
 *.local
+.env
+.env.*
+*.pem
+*.key
+
+# Local Codex/OpenAI auth and profile data. These files may contain account
+# tokens or API keys when CODEX_HOME/app data is pointed inside the repo.
+.codex/
+.codex-*/
+codex-accounts/
+terax-codex-accounts.json
+auth.json
 
 # Editor directories and files
 .vscode/*
