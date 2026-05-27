@@ -37,6 +37,7 @@ type Props = {
   onSelect: (id: number) => void;
   onNew: () => void;
   onNewPrivate: () => void;
+  onNewCodex: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
@@ -62,6 +63,7 @@ export function Header({
   onSelect,
   onNew,
   onNewPrivate,
+  onNewCodex,
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
@@ -195,6 +197,7 @@ export function Header({
           onSelect={onSelect}
           onNew={onNew}
           onNewPrivate={onNewPrivate}
+          onNewCodex={onNewCodex}
           onNewPreview={onNewPreview}
           onNewEditor={onNewEditor}
           onNewGitGraph={onNewGitGraph}

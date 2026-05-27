@@ -35,6 +35,7 @@ import { redactSensitive } from "@/modules/ai/lib/redact";
 import { native } from "@/modules/ai/lib/native";
 import { useAgentsStore } from "@/modules/ai/store/agentsStore";
 import { useSnippetsStore } from "@/modules/ai/store/snippetsStore";
+import { CodexStack } from "@/modules/codex/components/CodexStack";
 import {
   AiDiffStack,
   EditorStack,
@@ -166,6 +167,7 @@ export default function App() {
     setActiveId,
     newTab,
     newAgentTab,
+    newCodexTab,
     newPrivateTab,
     openFileTab,
     pinTab,
@@ -459,6 +461,7 @@ export default function App() {
 
   const activeTab = tabs.find((t) => t.id === activeId);
   const isTerminalTab = activeTab?.kind === "terminal";
+  const isCodexTab = activeTab?.kind === "codex";
   const isEditorTab = activeTab?.kind === "editor";
   const isPreviewTab = activeTab?.kind === "preview";
   const isMarkdownTab = activeTab?.kind === "markdown";
@@ -806,6 +809,10 @@ export default function App() {
     newPrivateTab(inheritedCwdForNewTab());
   }, [newPrivateTab, inheritedCwdForNewTab]);
 
+  const openNewCodexTab = useCallback(() => {
+    newCodexTab(inheritedCwdForNewTab());
+  }, [inheritedCwdForNewTab, newCodexTab]);
+
   const sendCd = useCallback(
     (path: string) => {
       if (activeLeafId === null) return;
@@ -896,6 +903,7 @@ export default function App() {
         activeTab.cwd ??
         null)
       : null;
+  const activeCodexCwd = activeTab?.kind === "codex" ? (activeTab.cwd ?? null) : null;
 
   const activeFilePath = (() => {
     if (activeTab?.kind === "editor") return activeTab.path;
@@ -918,6 +926,9 @@ export default function App() {
   const sourceControlContextPath = (() => {
     if (activeTab?.kind === "terminal") {
       return activeTerminalLeafCwd ?? explorerRoot ?? workspaceFallbackPath;
+    }
+    if (activeTab?.kind === "codex") {
+      return activeCodexCwd ?? explorerRoot ?? workspaceFallbackPath;
     }
     if (activeTab?.kind === "editor") return dirname(activeTab.path);
     if (activeTab?.kind === "git-diff") return activeTab.repoRoot;
@@ -1199,7 +1210,7 @@ export default function App() {
     gitHistoryHandle,
   ]);
 
-  const activeCwd = activeTerminalLeafCwd;
+  const activeCwd = activeTerminalLeafCwd ?? activeCodexCwd;
 
   useEffect(() => {
     const findCwd = () => {
@@ -1207,8 +1218,10 @@ export default function App() {
       if (active?.kind === "terminal") {
         return findLeafCwd(active.paneTree, active.activeLeafId) ?? active.cwd ?? null;
       }
+      if (active?.kind === "codex") return active.cwd ?? null;
       for (let i = tabs.length - 1; i >= 0; i--) {
         const t = tabs[i];
+        if (t.kind === "codex" && t.cwd) return t.cwd;
         if (t.kind !== "terminal") continue;
         const cwd = findLeafCwd(t.paneTree, t.activeLeafId) ?? t.cwd;
         if (cwd) return cwd;
@@ -1304,6 +1317,15 @@ export default function App() {
       <div
         className={cn(
           "absolute inset-0 px-3 pt-2 pb-2",
+          !isCodexTab && "invisible pointer-events-none",
+        )}
+        aria-hidden={!isCodexTab}
+      >
+        <CodexStack tabs={tabs} activeId={activeId} />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 px-3 pt-2 pb-2",
           !isEditorTab && "invisible pointer-events-none",
         )}
         aria-hidden={!isEditorTab}
@@ -1389,6 +1411,7 @@ export default function App() {
             onSelect={setActiveId}
             onNew={openNewTab}
             onNewPrivate={openNewPrivateTab}
+            onNewCodex={openNewCodexTab}
             onNewPreview={() => openPreviewTab("")}
             onNewEditor={() => setNewEditorOpen(true)}
             onNewGitGraph={openGitGraphFromContext}
@@ -1517,7 +1540,9 @@ export default function App() {
           ) : null}
 
           <AnimatePresence>
-            {miniOpen && hasComposer ? <AiMiniWindow key="ai-mini" /> : null}
+            {miniOpen && hasComposer && !isCodexTab ? (
+              <AiMiniWindow key="ai-mini" />
+            ) : null}
             {askPopup ? (
               <SelectionAskAi
                 key="ask-ai-popup"

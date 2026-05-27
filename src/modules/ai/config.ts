@@ -163,7 +163,7 @@ export const MODELS = [
   {
     id: "gpt-5.4-mini",
     provider: "openai",
-    label: "GPT-5.4 mini",
+    label: "GPT-5.4 Mini",
     hint: "Fast",
     description: "Snappy default at low cost.",
     capabilities: { intelligence: 4, speed: 4, cost: 4 },
@@ -172,7 +172,7 @@ export const MODELS = [
   {
     id: "gpt-5.4-nano",
     provider: "openai",
-    label: "GPT-5.4 nano",
+    label: "GPT-5.4 Nano",
     hint: "Fastest",
     description: "Tiny and instant — great for autocomplete.",
     capabilities: { intelligence: 3, speed: 5, cost: 5 },
@@ -190,7 +190,7 @@ export const MODELS = [
   {
     id: "gpt-4.1-mini",
     provider: "openai",
-    label: "GPT-4.1 mini",
+    label: "GPT-4.1 Mini",
     hint: "Cheap",
     description: "Ultra-cheap workhorse for bulk tasks.",
     capabilities: { intelligence: 3, speed: 4, cost: 5 },
@@ -513,7 +513,7 @@ export function modelKeepsReasoning(id: ModelId): boolean {
   return (m.tags?.includes("reasoning") ?? false) || FREEFORM_PROVIDERS.has(m.provider);
 }
 
-export const DEFAULT_MODEL_ID: ModelId = "gpt-5.4-mini";
+export const DEFAULT_MODEL_ID: ModelId = "gpt-5.5";
 
 /** Approximate context window (in tokens) per model. Used for the
  *  context-usage indicator in the AI mini-window header. Conservative

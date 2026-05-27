@@ -8,6 +8,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fmtShortcut, MOD_KEY } from "@/lib/platform";
 import { cn } from "@/lib/utils";
+import { CodexLogo } from "@/modules/codex/components/CodexLogo";
 import { fileIconUrl } from "@/modules/explorer/lib/iconResolver";
 import {
   Cancel01Icon,
@@ -30,6 +31,7 @@ type Props = {
   onSelect: (id: number) => void;
   onNew: () => void;
   onNewPrivate: () => void;
+  onNewCodex: () => void;
   onNewPreview: () => void;
   onNewEditor: () => void;
   onNewGitGraph: () => void;
@@ -45,6 +47,7 @@ export function TabBar({
   onSelect,
   onNew,
   onNewPrivate,
+  onNewCodex,
   onNewPreview,
   onNewEditor,
   onNewGitGraph,
@@ -180,6 +183,10 @@ export function TabBar({
                 {fmtShortcut(MOD_KEY, "R")}
               </span>
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onNewCodex()}>
+              <CodexLogo size={14} />
+              <span className="flex-1">Codex</span>
+            </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewEditor()}>
               <HugeiconsIcon
                 icon={PencilEdit02Icon}
@@ -223,6 +230,9 @@ function TabIcon({ tab }: { tab: Tab }) {
         className="shrink-0"
       />
     );
+  }
+  if (tab.kind === "codex") {
+    return <CodexLogo size={14} />;
   }
   if (tab.kind === "ai-diff") {
     return (
@@ -277,6 +287,7 @@ function TabIcon({ tab }: { tab: Tab }) {
 function labelFor(t: Tab): string {
   if (t.kind === "editor") return t.title;
   if (t.kind === "preview") return t.title;
+  if (t.kind === "codex") return t.title;
   if (t.kind === "markdown") return t.title;
   if (t.kind === "ai-diff") return t.title;
   if (t.kind === "git-diff") return t.title;

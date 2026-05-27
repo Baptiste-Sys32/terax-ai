@@ -9,12 +9,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactDOM from "react-dom/client";
 import App from "./app/App";
+import { AppErrorBoundary } from "./app/AppErrorBoundary";
 import { initLaunchDir } from "./lib/launchDir";
 import { USE_CUSTOM_WINDOW_CONTROLS } from "./lib/platform";
 
 if (USE_CUSTOM_WINDOW_CONTROLS) {
   document.documentElement.dataset.chrome = "borderless";
 }
+
+window.addEventListener("error", (event) => {
+  console.error("[terax] window error", event.error ?? event.message);
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  console.error("[terax] unhandled rejection", event.reason);
+});
 
 // Reap PTY sessions orphaned by a prior webview load before any tab spawns.
 await invoke("pty_close_all").catch(() => {});
@@ -23,7 +32,9 @@ await invoke("pty_close_all").catch(() => {});
 await initLaunchDir();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <App />,
+  <AppErrorBoundary>
+    <App />
+  </AppErrorBoundary>,
 );
 
 // Window starts hidden (per tauri.conf.json) so users never see a transparent
