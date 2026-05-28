@@ -36,6 +36,15 @@ import { native } from "@/modules/ai/lib/native";
 import { useAgentsStore } from "@/modules/ai/store/agentsStore";
 import { useSnippetsStore } from "@/modules/ai/store/snippetsStore";
 import { CodexStack } from "@/modules/codex/components/CodexStack";
+import type { CodexPaneHandle } from "@/modules/codex/components/CodexChatView";
+import {
+  loadPersistedCodexTabs,
+  savePersistedCodexTabs,
+} from "@/modules/codex/lib/tabPersistence";
+import {
+  CommandPalette,
+  type CommandPaletteAction,
+} from "@/modules/command-palette/CommandPalette";
 import {
   AiDiffStack,
   EditorStack,
@@ -79,7 +88,12 @@ import {
   useSourceControl,
 } from "@/modules/source-control";
 import { StatusBar } from "@/modules/statusbar";
-import { MAX_PANES_PER_TAB, useTabs, useWorkspaceCwd } from "@/modules/tabs";
+import {
+  MAX_PANES_PER_TAB,
+  useTabs,
+  useWorkspaceCwd,
+  type CodexTabState,
+} from "@/modules/tabs";
 import {
   clearFocusedTerminal,
   disposeSession,
@@ -113,6 +127,16 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { homeDir } from "@tauri-apps/api/path";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import {
+  Add01Icon,
+  Cancel01Icon,
+  CommandIcon,
+  Copy01Icon,
+  ForkIcon,
+  KeyboardIcon,
+  Refresh01Icon,
+  Settings01Icon,
+} from "@hugeicons/core-free-icons";
 import type { SearchAddon } from "@xterm/addon-search";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -169,6 +193,7 @@ export default function App() {
     newTab,
     newAgentTab,
     newCodexTab,
+    restoreCodexTabs,
     newPrivateTab,
     openFileTab,
     pinTab,
@@ -195,6 +220,26 @@ export default function App() {
   // (e.g. cdInNewTab) read the latest pane state instead of a stale closure.
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
+  const codexTabsRestoredRef = useRef(false);
+  const [codexTabsLoaded, setCodexTabsLoaded] = useState(false);
+
+  useEffect(() => {
+    if (codexTabsRestoredRef.current) return;
+    codexTabsRestoredRef.current = true;
+    void loadPersistedCodexTabs()
+      .then((items) => {
+        restoreCodexTabs(items);
+      })
+      .finally(() => {
+        setCodexTabsLoaded(true);
+      });
+  }, [restoreCodexTabs]);
+
+  useEffect(() => {
+    if (!codexTabsLoaded) return;
+    const codexTabs = tabs.filter((tab) => tab.kind === "codex");
+    void savePersistedCodexTabs(codexTabs);
+  }, [codexTabsLoaded, tabs]);
 
   const activeTerminalTab = useMemo(() => {
     const t = tabs.find((x) => x.id === activeId);
@@ -209,6 +254,7 @@ export default function App() {
   const terminalRefs = useRef<Map<number, TerminalPaneHandle>>(new Map());
   const editorRefs = useRef<Map<number, EditorPaneHandle>>(new Map());
   const previewRefs = useRef<Map<number, PreviewPaneHandle>>(new Map());
+  const codexRefs = useRef<Map<number, CodexPaneHandle>>(new Map());
   const [activeEditorHandle, setActiveEditorHandle] =
     useState<EditorPaneHandle | null>(null);
   const [gitHistoryHandle, setGitHistoryHandle] =
@@ -386,6 +432,7 @@ export default function App() {
   }, []);
 
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [newEditorOpen, setNewEditorOpen] = useState(false);
   const miniOpen = useChatStore((s) => s.mini.open);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
@@ -641,6 +688,7 @@ export default function App() {
       // handles need explicit cleanup here.
       editorRefs.current.delete(id);
       previewRefs.current.delete(id);
+      codexRefs.current.delete(id);
       closeTab(id);
     },
     [closeTab],
@@ -1041,8 +1089,82 @@ export default function App() {
     handleClose(activeId);
   }, [activeId, closeActivePane, handleClose]);
 
+  const commandActions = useMemo<CommandPaletteAction[]>(
+    () => {
+      const activeCodex = activeTab?.kind === "codex";
+      return [
+        {
+          id: "tab.new",
+          label: "New terminal tab",
+          group: "General",
+          shortcut: "Ctrl+T",
+          icon: Add01Icon,
+          run: openNewTab,
+        },
+        {
+          id: "tab.newCodex",
+          label: "New Codex tab",
+          group: "Codex",
+          shortcut: "Ctrl+O",
+          icon: CommandIcon,
+          run: openNewCodexTab,
+        },
+        {
+          id: "codex.resumeRecent",
+          label: "Resume recent session",
+          group: "Codex",
+          disabled: !activeCodex,
+          icon: Refresh01Icon,
+          run: () => codexRefs.current.get(activeId)?.resumeRecent(),
+        },
+        {
+          id: "codex.forkCurrent",
+          label: "Fork current session",
+          group: "Codex",
+          disabled: !activeCodex,
+          icon: ForkIcon,
+          run: () => codexRefs.current.get(activeId)?.forkCurrent(),
+        },
+        {
+          id: "codex.clearCurrent",
+          label: "Clear current session",
+          group: "Codex",
+          disabled: !activeCodex,
+          icon: Cancel01Icon,
+          run: () => codexRefs.current.get(activeId)?.clearCurrent(),
+        },
+        {
+          id: "codex.copyResumeId",
+          label: "Copy resume id",
+          group: "Codex",
+          disabled: !activeCodex,
+          icon: Copy01Icon,
+          run: () => codexRefs.current.get(activeId)?.copyResumeId(),
+        },
+        {
+          id: "settings.open",
+          label: "Open settings",
+          group: "General",
+          shortcut: "Ctrl+,",
+          icon: Settings01Icon,
+          run: () => void openSettingsWindow(),
+        },
+        {
+          id: "shortcuts.open",
+          label: "Show keyboard shortcuts",
+          group: "General",
+          shortcut: "Ctrl+K",
+          icon: KeyboardIcon,
+          run: () => setShortcutsOpen(true),
+        },
+      ];
+    },
+    [activeId, activeTab?.kind, openNewCodexTab, openNewTab],
+  );
+
   const shortcutHandlers = useMemo<ShortcutHandlers>(
     () => ({
+      "commandPalette.open": () => setCommandPaletteOpen((v) => !v),
       "tab.new": openNewTab,
       "tab.newPrivate": openNewPrivateTab,
       "tab.newCodex": openNewCodexTab,
@@ -1147,6 +1269,28 @@ export default function App() {
       else previewRefs.current.delete(id);
     },
     [],
+  );
+
+  const registerCodexHandle = useCallback(
+    (id: number, h: CodexPaneHandle | null) => {
+      if (h) codexRefs.current.set(id, h);
+      else codexRefs.current.delete(id);
+    },
+    [],
+  );
+
+  const handleCodexStateChange = useCallback(
+    (id: number, state: CodexTabState) => {
+      const title = state.threadId
+        ? `Codex ${state.threadId.slice(0, 8)}`
+        : "Codex";
+      updateTab(id, {
+        title,
+        codex: state,
+        ...(state.cwd ? { cwd: state.cwd } : {}),
+      });
+    },
+    [updateTab],
   );
 
   const handlePreviewUrl = useCallback(
@@ -1351,7 +1495,12 @@ export default function App() {
         )}
         aria-hidden={!isCodexTab}
       >
-        <CodexStack tabs={tabs} activeId={activeId} />
+        <CodexStack
+          tabs={tabs}
+          activeId={activeId}
+          registerHandle={registerCodexHandle}
+          onStateChange={handleCodexStateChange}
+        />
       </div>
       <div
         className={cn(
@@ -1588,6 +1737,12 @@ export default function App() {
           <ShortcutsDialog
             open={shortcutsOpen}
             onOpenChange={setShortcutsOpen}
+          />
+
+          <CommandPalette
+            open={commandPaletteOpen}
+            onOpenChange={setCommandPaletteOpen}
+            actions={commandActions}
           />
 
           <NewEditorDialog

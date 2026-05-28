@@ -1,13 +1,17 @@
-import type { Tab } from "@/modules/tabs";
+import type { CodexTabState, Tab } from "@/modules/tabs";
 import { useMemo } from "react";
-import { CodexChatView } from "./CodexChatView";
+import { CodexChatView, type CodexPaneHandle } from "./CodexChatView";
 
 export function CodexStack({
   tabs,
   activeId,
+  registerHandle,
+  onStateChange,
 }: {
   tabs: Tab[];
   activeId: number;
+  registerHandle?: (id: number, handle: CodexPaneHandle | null) => void;
+  onStateChange?: (id: number, state: CodexTabState) => void;
 }) {
   const codexTabs = useMemo(
     () => tabs.filter((tab) => tab.kind === "codex"),
@@ -28,7 +32,11 @@ export function CodexStack({
             }}
             aria-hidden={!visible}
           >
-            <CodexChatView tab={tab} />
+            <CodexChatView
+              ref={(handle) => registerHandle?.(tab.id, handle)}
+              tab={tab}
+              onStateChange={onStateChange}
+            />
           </div>
         );
       })}

@@ -32,6 +32,17 @@ export type CodexTab = {
   kind: "codex";
   title: string;
   cwd?: string;
+  codex?: CodexTabState;
+};
+
+export type CodexTabState = {
+  uid: string;
+  threadId: string | null;
+  cwd: string | null;
+  selectedModel: string;
+  effort: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+  permissionMode: "default" | "read-only" | "full-access";
+  updatedAt: number;
 };
 
 export type EditorTab = {
@@ -124,6 +135,7 @@ export type TabPatch = Partial<{
   path: string;
   dirty: boolean;
   url: string;
+  codex: CodexTabState;
 }>;
 
 function basename(path: string): string {
@@ -202,8 +214,19 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     [],
   );
 
-  const newCodexTab = useCallback((cwd?: string) => {
+  const newCodexTab = useCallback((cwd?: string, codex?: CodexTabState) => {
     const tabId = nextIdRef.current++;
+    const codexState =
+      codex ??
+      ({
+        uid: `codex-${Date.now()}-${tabId}`,
+        threadId: null,
+        cwd: cwd ?? null,
+        selectedModel: "",
+        effort: "low",
+        permissionMode: "default",
+        updatedAt: Date.now(),
+      } satisfies CodexTabState);
     setTabs((t) => [
       ...t,
       {
@@ -211,11 +234,41 @@ export function useTabs(initial?: Partial<TerminalTab>) {
         kind: "codex",
         title: "Codex",
         cwd,
+        codex: codexState,
       },
     ]);
     setActiveId(tabId);
     return tabId;
   }, []);
+
+  const restoreCodexTabs = useCallback(
+    (items: Array<{ title?: string; cwd?: string | null; codex: CodexTabState }>) => {
+      if (items.length === 0) return;
+      setTabs((curr) => {
+        const existing = new Set(
+          curr.flatMap((tab) =>
+            tab.kind === "codex" && tab.codex?.uid ? [tab.codex.uid] : [],
+          ),
+        );
+        const restored = items.flatMap((item) => {
+          if (!item.codex.uid || existing.has(item.codex.uid)) return [];
+          const id = nextIdRef.current++;
+          existing.add(item.codex.uid);
+          return [
+            {
+              id,
+              kind: "codex" as const,
+              title: item.title ?? "Codex",
+              cwd: item.cwd ?? item.codex.cwd ?? undefined,
+              codex: item.codex,
+            },
+          ];
+        });
+        return restored.length > 0 ? [...curr, ...restored] : curr;
+      });
+    },
+    [],
+  );
 
   const newPrivateTab = useCallback((cwd?: string) => {
     const tabId = nextIdRef.current++;
@@ -615,6 +668,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
             ...x,
             ...(patch.title !== undefined && { title: patch.title }),
             ...(patch.cwd !== undefined && { cwd: patch.cwd }),
+            ...(patch.codex !== undefined && { codex: patch.codex }),
           };
         }
         if (x.kind === "preview") {
@@ -831,6 +885,7 @@ export function useTabs(initial?: Partial<TerminalTab>) {
     newTab,
     newAgentTab,
     newCodexTab,
+    restoreCodexTabs,
     newPrivateTab,
     openFileTab,
     pinTab,

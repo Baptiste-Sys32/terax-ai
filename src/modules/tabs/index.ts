@@ -5,6 +5,7 @@ export {
   type Tab,
   type TerminalTab,
   type CodexTab,
+  type CodexTabState,
   type EditorTab,
   type PreviewTab,
   type MarkdownTab,
