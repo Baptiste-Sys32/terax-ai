@@ -1,6 +1,6 @@
 pub mod modules;
 
-use modules::{agent, codex, fs, git, net, pty, secrets, shell, workspace};
+use modules::{agent, clipboard, codex, fs, git, net, pty, secrets, shell, workspace};
 use std::sync::Mutex;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_window_state::StateFlags;
@@ -179,6 +179,7 @@ pub fn run() {
             open_settings_window,
             agent::agent_enable_claude_hooks,
             agent::agent_claude_hooks_status,
+            clipboard::clipboard_read_image,
             codex::codex_status,
             codex::codex_login_start,
             codex::codex_login_cancel,

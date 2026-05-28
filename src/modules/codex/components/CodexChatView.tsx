@@ -2435,6 +2435,12 @@ type ClipboardReadResult = {
   text: string | null;
 };
 
+type NativeClipboardImage = {
+  dataUrl: string;
+  width: number;
+  height: number;
+};
+
 async function createImageAttachment(
   blob: Blob,
   name = "Pasted image",
@@ -2517,6 +2523,11 @@ async function readClipboardAttachments(): Promise<ClipboardReadResult> {
     // Clipboard image reads are permission/platform dependent in WebKitGTK.
   }
 
+  if (attachments.length === 0) {
+    const nativeImage = await readNativeClipboardImage();
+    if (nativeImage) attachments.push(nativeImage);
+  }
+
   let text: string | null = null;
   try {
     if (typeof clipboard.readText === "function") {
@@ -2528,6 +2539,23 @@ async function readClipboardAttachments(): Promise<ClipboardReadResult> {
   }
 
   return { attachments, text };
+}
+
+async function readNativeClipboardImage(): Promise<CodexAttachment | null> {
+  try {
+    const image = await invoke<NativeClipboardImage | null>(
+      "clipboard_read_image",
+    );
+    if (!image?.dataUrl) return null;
+    return {
+      id: `image:native-clipboard:${image.width}x${image.height}:${image.dataUrl.length}`,
+      kind: "image",
+      url: image.dataUrl,
+      name: "Clipboard image",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function hasCodexDropPayload(data: DataTransfer): boolean {
