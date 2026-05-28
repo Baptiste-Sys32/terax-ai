@@ -196,6 +196,9 @@ export function TabBar({
             <DropdownMenuItem onSelect={() => onNewCodex()}>
               <CodexLogo size={14} />
               <span className="flex-1">Codex</span>
+              <span className="text-xs text-muted-foreground">
+                {fmtShortcut("Ctrl", "O")}
+              </span>
             </DropdownMenuItem>
             <DropdownMenuItem onSelect={() => onNewEditor()}>
               <HugeiconsIcon

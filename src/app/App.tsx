@@ -390,8 +390,10 @@ export default function App() {
   const miniOpen = useChatStore((s) => s.mini.open);
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const openMini = useChatStore((s) => s.openMini);
+  const closeMini = useChatStore((s) => s.closeMini);
   const focusInput = useChatStore((s) => s.focusInput);
   const openPanel = useChatStore((s) => s.openPanel);
+  const closePanel = useChatStore((s) => s.closePanel);
   const panelOpen = useChatStore((s) => s.panelOpen);
   const apiKeys = useChatStore((s) => s.apiKeys);
   const setApiKeys = useChatStore((s) => s.setApiKeys);
@@ -470,6 +472,12 @@ export default function App() {
   const isGitDiffTab =
     activeTab?.kind === "git-diff" || activeTab?.kind === "git-commit-file";
   const isGitHistoryTab = activeTab?.kind === "git-history";
+
+  useEffect(() => {
+    if (!isCodexTab) return;
+    closeMini();
+    closePanel();
+  }, [closeMini, closePanel, isCodexTab]);
 
   // When an AI diff is approved (write_file applied to disk), reload any
   // open editor tabs for that path so the user sees the new content. We
@@ -721,6 +729,12 @@ export default function App() {
 
   const handleAttachFileToAgent = useCallback(
     (path: string) => {
+      if (isCodexTab) {
+        window.dispatchEvent(
+          new CustomEvent<string>("terax:codex-attach-path", { detail: path }),
+        );
+        return;
+      }
       if (!hasComposer) {
         void openSettingsWindow("models");
         return;
@@ -733,7 +747,7 @@ export default function App() {
       openPanel();
       focusInput(null);
     },
-    [hasComposer, openPanel, focusInput],
+    [focusInput, hasComposer, isCodexTab, openPanel],
   );
 
   const askFromSelection = useCallback(() => {
@@ -1031,6 +1045,7 @@ export default function App() {
     () => ({
       "tab.new": openNewTab,
       "tab.newPrivate": openNewPrivateTab,
+      "tab.newCodex": openNewCodexTab,
       "tab.newPreview": () => openPreviewTab(""),
       "tab.newEditor": () => setNewEditorOpen(true),
       "tab.close": handleCloseTabOrPane,
@@ -1063,6 +1078,7 @@ export default function App() {
       cycleTab,
       handleCloseTabOrPane,
       openNewTab,
+      openNewCodexTab,
       openNewPrivateTab,
       openPreviewTab,
       selectByIndex,
@@ -1531,6 +1547,7 @@ export default function App() {
             onWorkspaceChange={switchWorkspace}
             onOpenMini={openMini}
             hasComposer={hasComposer}
+            hideAiControls={isCodexTab}
             privateActive={
               activeTab?.kind === "terminal" && activeTab.private === true
             }

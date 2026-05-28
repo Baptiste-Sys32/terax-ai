@@ -24,6 +24,7 @@ type Props = {
   onOpenMini: () => void;
   /** Only rendered when the AI panel is open and a key is loaded. */
   hasComposer: boolean;
+  hideAiControls?: boolean;
   privateActive: boolean;
 };
 
@@ -35,6 +36,7 @@ export function StatusBar({
   onWorkspaceChange,
   onOpenMini,
   hasComposer,
+  hideAiControls = false,
   privateActive,
 }: Props) {
   const panelOpen = useChatStore((s) => s.panelOpen);
@@ -60,14 +62,16 @@ export function StatusBar({
           </Tooltip>
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center gap-1.5">
-        <AgentStatusPill onClick={onOpenMini} />
-        {panelOpen && hasComposer ? (
-          <AiStatusBarControls />
-        ) : (
-          <AiOpenButton onOpen={openPanel} />
-        )}
-      </div>
+      {!hideAiControls ? (
+        <div className="flex shrink-0 items-center gap-1.5">
+          <AgentStatusPill onClick={onOpenMini} />
+          {panelOpen && hasComposer ? (
+            <AiStatusBarControls />
+          ) : (
+            <AiOpenButton onOpen={openPanel} />
+          )}
+        </div>
+      ) : null}
     </footer>
   );
 }
