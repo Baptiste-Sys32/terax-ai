@@ -31,6 +31,9 @@ import { useDocument } from "./lib/useDocument";
 import { inlineCompletion } from "./lib/autocomplete/inlineExtension";
 import { getKey } from "@/modules/ai/lib/keyring";
 import { onKeysChanged } from "@/modules/settings/store";
+import { MediaPreviewPane } from "./MediaPreviewPane";
+import { previewIntentForPath } from "./lib/mediaPreview";
+import { usePreviewFile } from "./lib/usePreviewFile";
 
 export type EditorPaneHandle = {
   setQuery: (q: string) => void;
@@ -60,8 +63,8 @@ function formatBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export const EditorPane = forwardRef<EditorPaneHandle, Props>(
-  function EditorPane({ path, onDirtyChange, onSaved, onClose }, ref) {
+const CodeEditorPane = forwardRef<EditorPaneHandle, Props>(
+  function CodeEditorPane({ path, onDirtyChange, onSaved, onClose }, ref) {
     const { doc, onChange, save, reload } = useDocument({ path, onDirtyChange });
     const reloadRef = useRef(reload);
     reloadRef.current = reload;
@@ -326,5 +329,82 @@ export const EditorPane = forwardRef<EditorPaneHandle, Props>(
         />
       </div>
     );
+  },
+);
+
+const PreviewEditorPane = forwardRef<EditorPaneHandle, Props>(
+  function PreviewEditorPane({ path, onDirtyChange }, ref) {
+    const rootRef = useRef<HTMLDivElement | null>(null);
+    const { state, reload } = usePreviewFile(path);
+    const reloadRef = useRef(reload);
+    reloadRef.current = reload;
+
+    useEffect(() => {
+      onDirtyChange?.(false);
+    }, [onDirtyChange, path]);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        setQuery: () => {},
+        findNext: () => {},
+        findPrevious: () => {},
+        clearQuery: () => {},
+        focus: () => {
+          rootRef.current?.focus();
+        },
+        getSelection: () => null,
+        getPath: () => path,
+        reload: () => reloadRef.current(),
+        undo: () => {},
+        redo: () => {},
+      }),
+      [path],
+    );
+
+    if (state.status === "loading") {
+      return (
+        <div
+          ref={rootRef}
+          tabIndex={-1}
+          className="flex h-full items-center justify-center text-xs text-muted-foreground outline-none"
+        >
+          Loading preview…
+        </div>
+      );
+    }
+
+    if (state.status === "error") {
+      return (
+        <div
+          ref={rootRef}
+          tabIndex={-1}
+          className="flex h-full items-center justify-center px-6 text-center text-xs text-destructive outline-none"
+        >
+          {state.message}
+        </div>
+      );
+    }
+
+    return (
+      <div ref={rootRef} tabIndex={-1} className="h-full min-h-0 outline-none">
+        <MediaPreviewPane
+          path={path}
+          result={state.result}
+          onReload={() => {
+            reloadRef.current();
+          }}
+        />
+      </div>
+    );
+  },
+);
+
+export const EditorPane = forwardRef<EditorPaneHandle, Props>(
+  function EditorPane(props, ref) {
+    if (previewIntentForPath(props.path)) {
+      return <PreviewEditorPane ref={ref} {...props} />;
+    }
+    return <CodeEditorPane ref={ref} {...props} />;
   },
 );
