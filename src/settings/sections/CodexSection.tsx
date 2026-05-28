@@ -2,12 +2,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   codexAccountCreate,
+  codexDebugStatus,
   codexLoginCancel,
   codexLoginStart,
   codexLogout,
   codexStatus,
   listenCodexEvents,
   type CodexAccount,
+  type CodexDebugStatus,
   type CodexLoginStartResponse,
   type CodexStatus,
 } from "@/modules/codex";
@@ -19,10 +21,11 @@ import {
   Copy01Icon,
   Login01Icon,
   Logout01Icon,
+  Folder01Icon,
   Refresh01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SectionHeader } from "../components/SectionHeader";
 import { SettingRow } from "../components/SettingRow";
@@ -31,13 +34,18 @@ export function CodexSection() {
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debug, setDebug] = useState<CodexDebugStatus | null>(null);
   const [pendingLogin, setPendingLogin] =
     useState<CodexLoginStartResponse | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const next = await codexStatus();
+      const [next, nextDebug] = await Promise.all([
+        codexStatus(),
+        codexDebugStatus().catch(() => null),
+      ]);
       setStatus(next);
+      setDebug(nextDebug);
       setError(next.detail ?? null);
       if (next.account) setPendingLogin(null);
     } catch (e) {
@@ -176,6 +184,60 @@ export function CodexSection() {
           <StatusBadge ok={loggedIn} label={loggedIn ? "Signed in" : "Signed out"} />
         </SettingRow>
 
+        <SettingRow
+          title="Debug"
+          description={
+            debug
+              ? `Home ${debug.activeAccountHome}`
+              : "Codex bridge diagnostics are loaded on refresh."
+          }
+        >
+          <StatusBadge
+            ok={debug?.appServerHealthy === true}
+            label={debug?.appServerHealthy ? "App-server live" : "App-server idle"}
+          />
+        </SettingRow>
+
+        {debug ? (
+          <div className="rounded-lg border border-border/60 bg-card/60 px-3 py-2.5">
+            <div className="grid gap-1.5 text-[11px] leading-relaxed">
+              <DebugLine label="Codex home" value={debug.codexHome} />
+              <DebugLine
+                label="Profile"
+                value={`${debug.activeAccountLabel} (${debug.activeAccountId})`}
+              />
+              <DebugLine
+                label="CLI"
+                value={debug.cliVersion ?? debug.codexBin ?? "Not detected"}
+              />
+              <DebugLine
+                label="Bridge error"
+                value={debug.lastBridgeError ?? "None"}
+              />
+            </div>
+            <div className="mt-3 flex items-center justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 gap-1.5 px-2 text-[11px]"
+                onClick={() => void navigator.clipboard?.writeText(debug.activeAccountHome)}
+              >
+                <HugeiconsIcon icon={Copy01Icon} size={12} strokeWidth={1.75} />
+                Copy home
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 gap-1.5 px-2 text-[11px]"
+                onClick={() => void revealItemInDir(debug.activeAccountHome)}
+              >
+                <HugeiconsIcon icon={Folder01Icon} size={12} strokeWidth={1.75} />
+                Open folder
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
         {pendingLogin ? (
           <PendingLoginRow flow={pendingLogin} onCancel={cancelLogin} busy={busy} />
         ) : null}
@@ -298,6 +360,15 @@ function StatusBadge({ ok, label }: { ok: boolean; label: string }) {
       ) : null}
       {label}
     </Badge>
+  );
+}
+
+function DebugLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[96px_minmax(0,1fr)] gap-2">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="truncate font-mono">{value}</span>
+    </div>
   );
 }
 

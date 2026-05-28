@@ -26,6 +26,17 @@ export type CodexAccountProfile = {
   managed: boolean;
 };
 
+export type CodexDebugStatus = {
+  codexHome: string;
+  activeAccountId: string;
+  activeAccountLabel: string;
+  activeAccountHome: string;
+  codexBin?: string | null;
+  cliVersion?: string | null;
+  appServerHealthy: boolean;
+  lastBridgeError?: string | null;
+};
+
 export type CodexLoginStartResponse =
   | { kind: "browser"; loginId: string; authUrl: string }
   | {
@@ -145,6 +156,10 @@ export function codexAccountCreate(label?: string): Promise<CodexAccountProfile>
   return invoke<CodexAccountProfile>("codex_account_create", {
     label: label ?? null,
   });
+}
+
+export function codexDebugStatus(): Promise<CodexDebugStatus> {
+  return invoke<CodexDebugStatus>("codex_debug_status");
 }
 
 export function codexAppRequest<T = unknown>(

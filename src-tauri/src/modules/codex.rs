@@ -20,6 +20,7 @@ const CODEX_ACCOUNTS_DIR: &str = "codex-accounts";
 pub struct CodexState {
     bridge: Mutex<Option<Arc<CodexBridge>>>,
     active_profile_id: Mutex<Option<String>>,
+    last_bridge_error: Mutex<Option<String>>,
 }
 
 #[derive(Serialize)]
@@ -43,6 +44,19 @@ pub struct CodexAccountProfile {
     account: Option<Value>,
     active: bool,
     managed: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexDebugStatus {
+    codex_home: String,
+    active_account_id: String,
+    active_account_label: String,
+    active_account_home: String,
+    codex_bin: Option<String>,
+    cli_version: Option<String>,
+    app_server_healthy: bool,
+    last_bridge_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -191,7 +205,11 @@ pub async fn codex_app_request(
         })?;
         let profile = active_profile(&app, state)?;
         let bridge = ensure_bridge(&app, state, &bin, &profile)?;
-        bridge.request(&method, params.unwrap_or(Value::Null))
+        let result = bridge.request(&method, params.unwrap_or(Value::Null));
+        if let Err(err) = &result {
+            set_last_bridge_error(state, err.clone());
+        }
+        result
     })
     .await
 }
@@ -208,7 +226,49 @@ pub async fn codex_app_respond(
         })?;
         let profile = active_profile(&app, state)?;
         let bridge = ensure_bridge(&app, state, &bin, &profile)?;
-        bridge.respond(request_id, result)
+        let response = bridge.respond(request_id, result);
+        if let Err(err) = &response {
+            set_last_bridge_error(state, err.clone());
+        }
+        response
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn codex_debug_status(app: AppHandle) -> Result<CodexDebugStatus, String> {
+    blocking_codex(app, |app, state| {
+        let active_profile = active_profile(&app, state)?;
+        let accounts = account_profiles(&app, &active_profile.id)?;
+        let active_account_label = accounts
+            .iter()
+            .find(|account| account.id == active_profile.id)
+            .map(|account| account.label.clone())
+            .unwrap_or_else(|| active_profile.label.clone());
+        let detected = detect_codex();
+        let app_server_healthy = state
+            .bridge
+            .lock()
+            .map_err(|_| "Codex bridge lock was poisoned".to_string())?
+            .as_ref()
+            .map(|bridge| bridge.alive.load(Ordering::Relaxed))
+            .unwrap_or(false);
+        let last_bridge_error = state
+            .last_bridge_error
+            .lock()
+            .map_err(|_| "Codex bridge-error lock was poisoned".to_string())?
+            .clone();
+
+        Ok(CodexDebugStatus {
+            codex_home: default_codex_home().display().to_string(),
+            active_account_id: active_profile.id,
+            active_account_label,
+            active_account_home: active_profile.home.display().to_string(),
+            codex_bin: detected.as_ref().map(|(bin, _)| bin.display().to_string()),
+            cli_version: detected.map(|(_, version)| version),
+            app_server_healthy,
+            last_bridge_error,
+        })
     })
     .await
 }
@@ -324,6 +384,7 @@ fn set_active_profile(
         .bridge
         .lock()
         .map_err(|_| "Codex bridge lock was poisoned".to_string())? = None;
+    clear_last_bridge_error(state);
     Ok(())
 }
 
@@ -366,6 +427,7 @@ fn create_account_profile(
         .bridge
         .lock()
         .map_err(|_| "Codex bridge lock was poisoned".to_string())? = None;
+    clear_last_bridge_error(state);
 
     Ok(profile_to_account_profile(&profile, &id, None))
 }
@@ -571,9 +633,25 @@ fn ensure_bridge(
         }
     }
 
-    let bridge = CodexBridge::spawn(app.clone(), bin, profile)?;
+    let bridge = CodexBridge::spawn(app.clone(), bin, profile).map_err(|err| {
+        set_last_bridge_error(state, err.clone());
+        err
+    })?;
+    clear_last_bridge_error(state);
     *guard = Some(Arc::clone(&bridge));
     Ok(bridge)
+}
+
+fn set_last_bridge_error(state: &CodexState, error: String) {
+    if let Ok(mut last) = state.last_bridge_error.lock() {
+        *last = Some(error);
+    }
+}
+
+fn clear_last_bridge_error(state: &CodexState) {
+    if let Ok(mut last) = state.last_bridge_error.lock() {
+        *last = None;
+    }
 }
 
 fn request_account_read(
