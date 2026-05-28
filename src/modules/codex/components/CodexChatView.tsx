@@ -21,9 +21,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   codexAccountSwitch,
+  codexAppRequest,
   codexAppRespond,
   codexModelList,
   codexStatus,
+  codexThreadFork,
+  codexThreadList,
+  codexThreadResume,
   codexThreadStart,
   codexTurnInterrupt,
   codexTurnStart,
@@ -35,6 +39,10 @@ import {
   type CodexPermissionMode,
   type CodexReasoningEffort,
   type CodexStatus,
+  type CodexThreadListItem,
+  type CodexThreadLoadResponse,
+  type CodexThreadStartResponse,
+  type CodexUserInput,
 } from "@/modules/codex";
 import {
   CODEX_PERMISSION_PRESETS,
@@ -50,21 +58,30 @@ import {
 } from "@/modules/codex/lib/chatState";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import type { CodexTab } from "@/modules/tabs";
+import { currentWorkspaceEnv } from "@/modules/workspace";
 import {
   AiBrain04Icon,
+  Add01Icon,
   ArrowUp01Icon,
   Cancel01Icon,
   CheckmarkCircle02Icon,
+  Clock01Icon,
   ComputerTerminal02Icon,
   File01Icon,
+  FileAttachmentIcon,
+  Folder01Icon,
+  Image02Icon,
   Loading03Icon,
   LockIcon,
   Settings01Icon,
   SquareIcon,
 } from "@hugeicons/core-free-icons";
+import { invoke } from "@tauri-apps/api/core";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+  ClipboardEvent,
   FormEvent,
+  Ref,
   useCallback,
   useEffect,
   useMemo,
@@ -78,9 +95,56 @@ type Props = {
   tab: CodexTab;
 };
 
+type CodexSlashNotice = {
+  title: string;
+  rows: Array<{ label: string; value: string }>;
+  detail?: string;
+};
+
+export type CodexAttachment =
+  | {
+      id: string;
+      kind: "path";
+      path: string;
+      pathKind: "file" | "folder" | "path";
+    }
+  | {
+      id: string;
+      kind: "localImage";
+      path: string;
+      name: string;
+    }
+  | {
+      id: string;
+      kind: "image";
+      url: string;
+      name: string;
+    };
+
+type SessionBrowserState =
+  | { status: "closed"; sessions: CodexThreadListItem[] }
+  | { status: "loading"; sessions: CodexThreadListItem[] }
+  | { status: "loaded"; sessions: CodexThreadListItem[] }
+  | { status: "error"; sessions: CodexThreadListItem[]; message: string };
+
 const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffort = "low";
+const IMAGE_EXTENSIONS = new Set([
+  "avif",
+  "bmp",
+  "gif",
+  "jpeg",
+  "jpg",
+  "png",
+  "webp",
+]);
 const CODEX_SLASH_COMMANDS = [
+  {
+    name: "new",
+    invocation: "/new",
+    label: "New",
+    description: "Start a fresh Codex thread in this tab.",
+  },
   {
     name: "status",
     invocation: "/status",
@@ -106,6 +170,24 @@ const CODEX_SLASH_COMMANDS = [
     description: "Start fresh in the current Codex tab.",
   },
   {
+    name: "resume",
+    invocation: "/resume",
+    label: "Resume",
+    description: "Browse or resume recent Codex sessions.",
+  },
+  {
+    name: "fork",
+    invocation: "/fork",
+    label: "Fork",
+    description: "Branch the current Codex thread.",
+  },
+  {
+    name: "exit",
+    invocation: "/exit",
+    label: "Exit",
+    description: "Show the resume id and detach this tab from the thread.",
+  },
+  {
     name: "help",
     invocation: "/help",
     label: "Help",
@@ -123,8 +205,20 @@ const CODEX_REASONING_EFFORTS = new Set<string>([
 
 type LocalAction =
   | { type: "event"; event: CodexEvent }
-  | { type: "thread-started"; threadId: string; items?: CodexThreadItem[] }
+  | {
+      type: "thread-started";
+      threadId: string;
+      cwd?: string | null;
+      items?: CodexThreadItem[];
+    }
   | { type: "turn-started"; turnId: string; items?: CodexThreadItem[] }
+  | {
+      type: "thread-loaded";
+      threadId: string;
+      cwd?: string | null;
+      items?: CodexThreadItem[];
+    }
+  | { type: "reset" }
   | { type: "error"; message: string }
   | { type: "resolved"; requestId: string | number };
 
@@ -134,6 +228,7 @@ function chatReducer(state: CodexChatState, action: LocalAction): CodexChatState
     return {
       ...state,
       threadId: action.threadId,
+      cwd: action.cwd ?? state.cwd,
       status: "running",
       error: null,
       items: action.items
@@ -141,6 +236,15 @@ function chatReducer(state: CodexChatState, action: LocalAction): CodexChatState
         : state.items,
     };
   }
+  if (action.type === "thread-loaded") {
+    return {
+      ...createInitialCodexChatState(),
+      threadId: action.threadId,
+      cwd: action.cwd ?? null,
+      items: action.items ?? [],
+    };
+  }
+  if (action.type === "reset") return createInitialCodexChatState();
   if (action.type === "turn-started") {
     return {
       ...state,
@@ -214,6 +318,8 @@ export function CodexChatView({ tab }: Props) {
   );
   const stateRef = useRef(state);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modelButtonRef = useRef<HTMLButtonElement>(null);
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [models, setModels] = useState<CodexModel[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_CODEX_MODEL);
@@ -223,7 +329,12 @@ export function CodexChatView({ tab }: Props) {
   const [permissionMode, setPermissionMode] =
     useState<CodexPermissionMode>("default");
   const [prompt, setPrompt] = useState("");
-  const [slashNotice, setSlashNotice] = useState<string | null>(null);
+  const [slashNotice, setSlashNotice] = useState<CodexSlashNotice | null>(null);
+  const [attachments, setAttachments] = useState<CodexAttachment[]>([]);
+  const [sessionBrowser, setSessionBrowser] = useState<SessionBrowserState>({
+    status: "closed",
+    sessions: [],
+  });
   const [slashIndex, setSlashIndex] = useState(0);
   const [loadingModels, setLoadingModels] = useState(false);
   const [sending, setSending] = useState(false);
@@ -369,44 +480,352 @@ export function CodexChatView({ tab }: Props) {
     [],
   );
 
-  const runLocalSlashCommand = useCallback(
-    (text: string): boolean => {
-      const command = text.trim().toLowerCase();
+  const currentPreset = useCallback(
+    () => CODEX_PERMISSION_PRESETS[permissionMode],
+    [permissionMode],
+  );
+
+  const showStopFirst = useCallback(() => {
+    setSlashNotice({
+      title: "Codex",
+      rows: [{ label: "Status", value: "Stop the current turn first." }],
+    });
+  }, []);
+
+  const loadThreadIntoView = useCallback(
+    (response: CodexThreadLoadResponse | CodexThreadStartResponse) => {
+      const thread = response.thread;
+      const threadId = thread.id;
+      dispatch({
+        type: "thread-loaded",
+        threadId,
+        cwd: thread.cwd ?? response.cwd ?? null,
+        items: flattenThreadItems(thread.turns),
+      });
+      if (response.model) setSelectedModel(response.model);
+      if (isReasoningEffort(response.reasoningEffort)) {
+        setEffort(response.reasoningEffort);
+      }
+      setSessionBrowser((browser) => ({
+        status: "closed",
+        sessions: browser.sessions,
+      }));
+    },
+    [],
+  );
+
+  const startFreshThread = useCallback(
+    async (options?: {
+      source?: "startup" | "clear";
+      showPreviousId?: boolean;
+      silent?: boolean;
+    }) => {
+      if (running) {
+        showStopFirst();
+        return;
+      }
+      if (!installed || !loggedIn) {
+        void openSettingsWindow("codex");
+        return;
+      }
+
+      const previousThreadId = stateRef.current.threadId;
+      const preset = currentPreset();
+      setSending(true);
+      setPrompt("");
+      setAttachments([]);
+      setSessionBrowser((browser) => ({
+        status: "closed",
+        sessions: browser.sessions,
+      }));
+      dispatch({ type: "reset" });
+      try {
+        const started = await codexThreadStart({
+          cwd: tab.cwd,
+          model: selectedModelInfo?.model,
+          approvalPolicy: preset.approvalPolicy,
+          sandbox: preset.sandbox,
+          sessionStartSource: options?.source,
+        });
+        loadThreadIntoView(started);
+        if (options?.showPreviousId && previousThreadId) {
+          setSlashNotice({
+            title: "New chat",
+            rows: [{ label: "Previous", value: `/resume ${previousThreadId}` }],
+          });
+        } else if (!options?.silent) {
+          setSlashNotice(null);
+        }
+      } catch (error) {
+        dispatch({ type: "error", message: String(error) });
+      } finally {
+        setSending(false);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      }
+    },
+    [
+      currentPreset,
+      installed,
+      loadThreadIntoView,
+      loggedIn,
+      running,
+      selectedModelInfo?.model,
+      showStopFirst,
+      tab.cwd,
+    ],
+  );
+
+  const openSessionBrowser = useCallback(async () => {
+    if (running) {
+      showStopFirst();
+      return;
+    }
+    if (!installed || !loggedIn) {
+      void openSettingsWindow("codex");
+      return;
+    }
+    setSessionBrowser((browser) => ({
+      status: "loading",
+      sessions: browser.sessions,
+    }));
+    try {
+      const response = await codexThreadList({
+        limit: 30,
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        archived: false,
+      });
+      const sessions = normalizeThreadList(response);
+      setSessionBrowser({ status: "loaded", sessions });
+      setSlashNotice(null);
+    } catch (error) {
+      setSessionBrowser((browser) => ({
+        status: "error",
+        sessions: browser.sessions,
+        message: String(error),
+      }));
+    }
+  }, [installed, loggedIn, running, showStopFirst]);
+
+  const resumeThread = useCallback(
+    async (threadId: string) => {
+      if (running) {
+        showStopFirst();
+        return;
+      }
+      if (!threadId) return;
+      const preset = currentPreset();
+      setSending(true);
+      setPrompt("");
+      setAttachments([]);
+      setSlashNotice(null);
+      try {
+        const response = await codexThreadResume({
+          threadId,
+          cwd: stateRef.current.cwd ?? tab.cwd,
+          model: selectedModelInfo?.model,
+          approvalPolicy: preset.approvalPolicy,
+          sandbox: preset.sandbox,
+        });
+        loadThreadIntoView(response);
+      } catch (error) {
+        dispatch({ type: "error", message: String(error) });
+      } finally {
+        setSending(false);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      }
+    },
+    [
+      currentPreset,
+      loadThreadIntoView,
+      running,
+      selectedModelInfo?.model,
+      showStopFirst,
+      tab.cwd,
+    ],
+  );
+
+  const forkThread = useCallback(async () => {
+    if (running) {
+      showStopFirst();
+      return;
+    }
+    const threadId = stateRef.current.threadId;
+    if (!threadId) {
+      setSlashNotice({
+        title: "Fork",
+        rows: [{ label: "Status", value: "Start a Codex thread first." }],
+      });
+      return;
+    }
+    const preset = currentPreset();
+    setSending(true);
+    setPrompt("");
+    setAttachments([]);
+    setSlashNotice(null);
+    try {
+      const response = await codexThreadFork({
+        threadId,
+        cwd: stateRef.current.cwd ?? tab.cwd,
+        model: selectedModelInfo?.model,
+        approvalPolicy: preset.approvalPolicy,
+        sandbox: preset.sandbox,
+      });
+      loadThreadIntoView(response);
+    } catch (error) {
+      dispatch({ type: "error", message: String(error) });
+    } finally {
+      setSending(false);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+    }
+  }, [
+    currentPreset,
+    loadThreadIntoView,
+    running,
+    selectedModelInfo?.model,
+    showStopFirst,
+    tab.cwd,
+  ]);
+
+  const runSlashCommand = useCallback(
+    async (text: string): Promise<boolean> => {
+      const rawCommand = text.trim();
+      const command = rawCommand.toLowerCase();
+      if (command === "/new") {
+        await startFreshThread({ showPreviousId: true });
+        return true;
+      }
       if (command === "/status") {
-        const model = selectedModelInfo?.displayName ?? formatGptModelName(selectedModel);
+        const rateLimits = await codexAppRequest<Record<string, unknown>>(
+          "account/rateLimits/read",
+        ).catch(() => null);
+        const limit = bestRateLimit(rateLimits);
         const account = status?.account
           ? formatAccountDetail(status.account)
           : "Signed out";
-        setSlashNotice(
-          `Status: ${installed ? "Codex CLI connected" : "Codex CLI missing"} · ${account} · ${model} · ${REASONING_LABELS[effort] ?? effort} · ${CODEX_PERMISSION_PRESETS[permissionMode].label}`,
-        );
+        const model =
+          selectedModelInfo?.displayName ?? formatGptModelName(selectedModel);
+        const preset = CODEX_PERMISSION_PRESETS[permissionMode];
+        setSlashNotice({
+          title: "OpenAI Codex",
+          rows: [
+            { label: "Version", value: status?.version ?? "Unknown" },
+            {
+              label: "Model",
+              value: `${model} (reasoning ${REASONING_LABELS[effort] ?? effort})`,
+            },
+            { label: "Directory", value: tab.cwd ?? "~" },
+            { label: "Permissions", value: preset.label },
+            { label: "Account", value: account },
+            { label: "Session", value: stateRef.current.threadId ?? "<none>" },
+            {
+              label: "5h limit",
+              value: formatRateLimitWindow(limit?.primary),
+            },
+            {
+              label: "Weekly limit",
+              value: formatRateLimitWindow(limit?.secondary),
+            },
+          ],
+          detail:
+            "Visit https://chatgpt.com/codex/settings/usage for up-to-date information on rate limits and credits.",
+        });
         setPrompt("");
         return true;
       }
       if (command === "/model") {
-        const model = selectedModelInfo?.displayName ?? formatGptModelName(selectedModel);
-        setSlashNotice(
-          `Model: ${model}. Use the model picker in the composer to switch models.`,
-        );
+        modelButtonRef.current?.focus();
+        modelButtonRef.current?.click();
         setPrompt("");
         return true;
       }
+      if (command === "/compact") {
+        const threadId = stateRef.current.threadId;
+        if (!threadId) {
+          setSlashNotice({
+            title: "Compact",
+            rows: [{ label: "Status", value: "Start a Codex thread first." }],
+          });
+          setPrompt("");
+          return true;
+        }
+        await codexAppRequest("thread/compact/start", { threadId });
+        setSlashNotice({
+          title: "Compact",
+          rows: [{ label: "Status", value: "Compaction started." }],
+        });
+        setPrompt("");
+        return true;
+      }
+      if (command === "/clear") {
+        await startFreshThread({ source: "clear", silent: true });
+        return true;
+      }
+      if (command === "/resume") {
+        setPrompt("");
+        await openSessionBrowser();
+        return true;
+      }
+      if (command.startsWith("/resume ")) {
+        const threadId = rawCommand.slice("/resume ".length).trim();
+        setPrompt("");
+        await resumeThread(threadId);
+        return true;
+      }
+      if (command === "/fork") {
+        await forkThread();
+        return true;
+      }
+      if (command === "/exit") {
+        if (running) {
+          showStopFirst();
+          return true;
+        }
+        const threadId = stateRef.current.threadId;
+        setSlashNotice({
+          title: "Exit",
+          rows: [
+            {
+              label: "Resume",
+              value: threadId
+                ? `To continue this session, use /resume ${threadId}`
+                : "No active Codex session.",
+            },
+          ],
+        });
+        setPrompt("");
+        setAttachments([]);
+        dispatch({ type: "reset" });
+        return true;
+      }
       if (command === "/help") {
-        setSlashNotice(
-          `Commands: ${CODEX_SLASH_COMMANDS.map((item) => item.invocation).join(", ")}`,
-        );
+        setSlashNotice({
+          title: "Commands",
+          rows: CODEX_SLASH_COMMANDS.map((item) => ({
+            label: item.invocation,
+            value: item.description,
+          })),
+        });
         setPrompt("");
         return true;
       }
       return false;
     },
     [
+      currentPreset,
       effort,
-      installed,
+      forkThread,
+      openSessionBrowser,
       permissionMode,
+      resumeThread,
       selectedModel,
       selectedModelInfo?.displayName,
+      showStopFirst,
+      startFreshThread,
       status?.account,
+      status?.version,
+      tab.cwd,
+      running,
     ],
   );
 
@@ -420,30 +839,62 @@ export function CodexChatView({ tab }: Props) {
         const nextStatus = await codexAccountSwitch(profileId);
         setStatus(nextStatus);
         await loadModels(nextStatus);
+        dispatch({ type: "reset" });
+        setPrompt("");
+        setAttachments([]);
+        setSlashNotice(null);
+        setSessionBrowser((browser) => ({
+          status: "closed",
+          sessions: browser.sessions,
+        }));
+        if (nextStatus.installed && nextStatus.account) {
+          const preset = currentPreset();
+          const started = await codexThreadStart({
+            cwd: tab.cwd,
+            model: selectedModelInfo?.model,
+            approvalPolicy: preset.approvalPolicy,
+            sandbox: preset.sandbox,
+          });
+          loadThreadIntoView(started);
+        }
       } catch (error) {
         dispatch({ type: "error", message: String(error) });
       } finally {
         setLoadingModels(false);
       }
     },
-    [loadModels, status?.activeAccountId],
+    [
+      currentPreset,
+      loadModels,
+      loadThreadIntoView,
+      selectedModelInfo?.model,
+      status?.activeAccountId,
+      tab.cwd,
+    ],
   );
 
   const submitPrompt = useCallback(
     async (event?: FormEvent) => {
       event?.preventDefault();
       const text = prompt.trim();
-      if (!text || sending) return;
-      if (runLocalSlashCommand(text)) return;
+      if ((!text && attachments.length === 0) || sending) return;
+      if (attachments.length === 0 && text && (await runSlashCommand(text))) return;
       if (!installed || !loggedIn) {
         void openSettingsWindow("codex");
         return;
       }
 
       const preset = CODEX_PERMISSION_PRESETS[permissionMode];
+      const input = codexInputFromComposer(text, attachments);
+      if (input.length === 0) return;
       setSending(true);
       setSlashNotice(null);
+      setSessionBrowser((browser) => ({
+        status: "closed",
+        sessions: browser.sessions,
+      }));
       setPrompt("");
+      setAttachments([]);
       try {
         let threadId = stateRef.current.threadId;
         if (!threadId) {
@@ -457,14 +908,15 @@ export function CodexChatView({ tab }: Props) {
           dispatch({
             type: "thread-started",
             threadId,
+            cwd: started.thread.cwd ?? started.cwd ?? tab.cwd ?? null,
             items: flattenThreadItems(started.thread.turns),
           });
         }
 
         const turn = await codexTurnStart({
           threadId,
-          text,
-          cwd: tab.cwd,
+          input,
+          cwd: stateRef.current.cwd ?? tab.cwd,
           model: selectedModelInfo?.model,
           effort,
           approvalPolicy: preset.approvalPolicy,
@@ -476,6 +928,7 @@ export function CodexChatView({ tab }: Props) {
         });
       } catch (error) {
         setPrompt(text);
+        setAttachments(attachments);
         dispatch({ type: "error", message: String(error) });
       } finally {
         setSending(false);
@@ -487,10 +940,11 @@ export function CodexChatView({ tab }: Props) {
       loggedIn,
       permissionMode,
       prompt,
-      runLocalSlashCommand,
+      runSlashCommand,
       selectedModelInfo?.model,
       sending,
       tab.cwd,
+      attachments,
     ],
   );
 
@@ -503,6 +957,40 @@ export function CodexChatView({ tab }: Props) {
     } catch (error) {
       dispatch({ type: "error", message: String(error) });
     }
+  }, []);
+
+  useEffect(() => {
+    const onAttach = (event: Event) => {
+      const path = (event as CustomEvent<string>).detail;
+      if (typeof path !== "string" || path.length === 0) return;
+      void createPathAttachment(path).then((attachment) => {
+        setAttachments((current) => appendAttachment(current, attachment));
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      });
+    };
+    window.addEventListener("terax:codex-attach-path", onAttach);
+    return () => window.removeEventListener("terax:codex-attach-path", onAttach);
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((current) =>
+      current.filter((attachment) => attachment.id !== id),
+    );
+  }, []);
+
+  const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.files ?? []).filter((file) =>
+      file.type.startsWith("image/"),
+    );
+    if (files.length === 0) return;
+    event.preventDefault();
+    void Promise.all(files.map((file) => createImageAttachment(file))).then(
+      (next) => {
+        setAttachments((current) =>
+          next.reduce((acc, attachment) => appendAttachment(acc, attachment), current),
+        );
+      },
+    );
   }, []);
 
   const respondToRequest = useCallback(
@@ -596,16 +1084,25 @@ export function CodexChatView({ tab }: Props) {
               {state.error}
             </div>
           ) : null}
-          {slashNotice ? (
-            <div className="rounded-lg border border-border/70 bg-muted/35 px-3 py-2 font-mono text-[11.5px] text-muted-foreground">
-              {slashNotice}
-            </div>
-          ) : null}
+          {slashNotice ? <CodexSlashNoticeCard notice={slashNotice} /> : null}
         </div>
       </div>
 
       <div className="shrink-0 border-t border-border/60 bg-background/95 px-4 py-3 backdrop-blur">
         <form onSubmit={submitPrompt} className="mx-auto w-full max-w-208">
+          {sessionBrowser.status !== "closed" ? (
+            <SessionBrowserPanel
+              browser={sessionBrowser}
+              currentThreadId={state.threadId}
+              onResume={resumeThread}
+              onClose={() =>
+                setSessionBrowser((browser) => ({
+                  status: "closed",
+                  sessions: browser.sessions,
+                }))
+              }
+            />
+          ) : null}
           <div className="rounded-[22px] p-px transition-colors focus-within:bg-ring/30">
             <div className="overflow-hidden rounded-[20px] border border-border bg-card">
               {activePending ? (
@@ -621,8 +1118,10 @@ export function CodexChatView({ tab }: Props) {
 
               <div className="px-3 pt-3">
                 <Textarea
+                  ref={textareaRef}
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
+                  onPaste={handlePaste}
                   onKeyDown={(event) => {
                     if (showSlashCommands) {
                       if (event.key === "ArrowDown") {
@@ -682,13 +1181,33 @@ export function CodexChatView({ tab }: Props) {
                 />
               ) : null}
 
+              {attachments.length > 0 ? (
+                <AttachmentTray
+                  attachments={attachments}
+                  onRemove={removeAttachment}
+                />
+              ) : null}
+
               <div className="flex min-w-0 items-center justify-between gap-2 px-2.5 pb-2.5">
                 <div className="-m-1 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    title="New chat"
+                    disabled={running || !installed || !loggedIn}
+                    onClick={() => void startFreshThread({ showPreviousId: true })}
+                    className="size-7 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                  >
+                    <HugeiconsIcon icon={Add01Icon} size={14} strokeWidth={1.9} />
+                  </Button>
+                  <div className="mx-1 h-5 w-px shrink-0 bg-border/70" />
                   <ModelSelect
                     models={models}
                     value={selectedModel}
                     disabled={!loggedIn || loadingModels}
                     onChange={setSelectedModel}
+                    triggerRef={modelButtonRef}
                   />
                   <ReasoningSelect
                     value={effort}
@@ -715,7 +1234,7 @@ export function CodexChatView({ tab }: Props) {
                   <button
                     type="submit"
                     disabled={
-                      !prompt.trim() ||
+                      (!prompt.trim() && attachments.length === 0) ||
                       !installed ||
                       !loggedIn ||
                       !!activePending ||
@@ -848,6 +1367,192 @@ function accountProfileTitle(profile: CodexAccountProfile): string {
   return `${profile.label} - ${formatAccountDetail(profile.account ?? null)}`;
 }
 
+function SessionBrowserPanel({
+  browser,
+  currentThreadId,
+  onResume,
+  onClose,
+}: {
+  browser: SessionBrowserState;
+  currentThreadId: string | null;
+  onResume: (threadId: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="mb-2 overflow-hidden rounded-xl border border-border/70 bg-card shadow-sm">
+      <div className="flex items-center justify-between gap-3 border-b border-border/60 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <HugeiconsIcon
+            icon={Clock01Icon}
+            size={13}
+            strokeWidth={1.75}
+            className="text-muted-foreground"
+          />
+          <span className="text-[12px] font-medium">Recent sessions</span>
+          {browser.status === "loading" ? (
+            <HugeiconsIcon
+              icon={Loading03Icon}
+              size={12}
+              strokeWidth={1.75}
+              className="animate-spin text-muted-foreground"
+            />
+          ) : null}
+        </div>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          title="Close"
+          onClick={onClose}
+          className="size-6"
+        >
+          <HugeiconsIcon icon={Cancel01Icon} size={12} strokeWidth={1.75} />
+        </Button>
+      </div>
+      {browser.status === "error" ? (
+        <div className="px-3 py-2 text-[11.5px] text-destructive">
+          {browser.message}
+        </div>
+      ) : null}
+      {browser.status === "loaded" && browser.sessions.length === 0 ? (
+        <div className="px-3 py-3 text-[11.5px] text-muted-foreground">
+          No recent Codex sessions found for this account.
+        </div>
+      ) : null}
+      {browser.sessions.length > 0 ? (
+        <div className="max-h-64 overflow-y-auto p-1">
+          {browser.sessions.map((session) => {
+            const id = session.id;
+            const selected = id === currentThreadId;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => onResume(id)}
+                className={cn(
+                  "grid w-full gap-1 rounded-lg px-2.5 py-2 text-left text-[11.5px] hover:bg-accent",
+                  selected && "bg-accent/70",
+                )}
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
+                    {sessionTitle(session)}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
+                    {shortThreadId(id)}
+                  </span>
+                </div>
+                <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
+                  <span className="min-w-0 max-w-full truncate font-mono">
+                    {stringField(session.cwd) ?? "No cwd"}
+                  </span>
+                  <span>{formatSessionUpdated(session)}</span>
+                  <span>{sessionSource(session)}</span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AttachmentTray({
+  attachments,
+  onRemove,
+}: {
+  attachments: CodexAttachment[];
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <div className="border-t border-border/60 px-3 py-2">
+      <div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto">
+        {attachments.map((attachment) => (
+          <AttachmentChip
+            key={attachment.id}
+            attachment={attachment}
+            onRemove={onRemove}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AttachmentChip({
+  attachment,
+  onRemove,
+}: {
+  attachment: CodexAttachment;
+  onRemove: (id: string) => void;
+}) {
+  const icon =
+    attachment.kind === "image" || attachment.kind === "localImage"
+      ? Image02Icon
+      : attachment.pathKind === "folder"
+        ? Folder01Icon
+        : FileAttachmentIcon;
+  const label =
+    attachment.kind === "image"
+      ? attachment.name
+      : attachment.kind === "localImage"
+        ? attachment.name
+        : attachment.path;
+
+  return (
+    <span className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border border-border/70 bg-muted/35 px-2 text-[11px]">
+      {attachment.kind === "image" ? (
+        <img
+          src={attachment.url}
+          alt=""
+          className="size-4 rounded-sm object-cover"
+        />
+      ) : (
+        <HugeiconsIcon
+          icon={icon}
+          size={12}
+          strokeWidth={1.75}
+          className="shrink-0 text-muted-foreground"
+        />
+      )}
+      <span className="min-w-0 truncate font-mono">{label}</span>
+      <button
+        type="button"
+        className="ml-0.5 flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground"
+        title="Remove attachment"
+        onClick={() => onRemove(attachment.id)}
+      >
+        <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={1.8} />
+      </button>
+    </span>
+  );
+}
+
+function CodexSlashNoticeCard({ notice }: { notice: CodexSlashNotice }) {
+  return (
+    <div className="mx-auto w-full max-w-148 rounded-xl border border-border/70 bg-card/85 px-4 py-3 shadow-sm">
+      <div className="mb-2 flex items-center gap-2 text-[12px] font-semibold">
+        <CodexLogo size={15} />
+        <span>{notice.title}</span>
+      </div>
+      {notice.detail ? (
+        <p className="mb-3 text-[11px] leading-5 text-muted-foreground">
+          {notice.detail}
+        </p>
+      ) : null}
+      <dl className="grid gap-1.5 font-mono text-[11.5px]">
+        {notice.rows.map((row) => (
+          <div key={row.label} className="grid grid-cols-[8rem_1fr] gap-3">
+            <dt className="text-muted-foreground">{row.label}:</dt>
+            <dd className="min-w-0 truncate text-foreground">{row.value}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 function formatAccountDetail(account: CodexAccount | null): string {
   if (!account) return "Signed out";
   if (account.type === "chatgpt") {
@@ -859,16 +1564,62 @@ function formatAccountDetail(account: CodexAccount | null): string {
   return String(account.type ?? "Codex account");
 }
 
+function bestRateLimit(
+  response: Record<string, unknown> | null,
+): { primary?: Record<string, unknown>; secondary?: Record<string, unknown> } | null {
+  if (!response) return null;
+  const byId = asObject(response.rateLimitsByLimitId);
+  const codex = asObject(byId.codex);
+  const fallback = asObject(response.rateLimits);
+  const selected = Object.keys(codex).length > 0 ? codex : fallback;
+  if (Object.keys(selected).length === 0) return null;
+  return {
+    primary: asObject(selected.primary),
+    secondary: asObject(selected.secondary),
+  };
+}
+
+function formatRateLimitWindow(window: Record<string, unknown> | undefined): string {
+  if (!window || Object.keys(window).length === 0) return "Unavailable";
+  const used = typeof window.usedPercent === "number" ? window.usedPercent : null;
+  const left = used === null ? null : Math.max(0, 100 - used);
+  const reset =
+    typeof window.resetsAt === "number" && Number.isFinite(window.resetsAt)
+      ? `, resets ${formatResetTime(window.resetsAt)}`
+      : "";
+  return left === null ? `Unavailable${reset}` : `${Math.round(left)}% left${reset}`;
+}
+
+function formatResetTime(timestamp: number): string {
+  const millis = timestamp > 10_000_000_000 ? timestamp : timestamp * 1000;
+  const date = new Date(millis);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
 function ModelSelect({
   models,
   value,
   disabled,
   onChange,
+  triggerRef,
 }: {
   models: CodexModel[];
   value: string;
   disabled: boolean;
   onChange: (value: string) => void;
+  triggerRef?: Ref<HTMLButtonElement>;
 }) {
   const selected = models.find((model) => model.model === value) ?? null;
   const selectedLabel = selected?.displayName ?? formatGptModelName(value);
@@ -876,6 +1627,7 @@ function ModelSelect({
   return (
     <Select value={value} onValueChange={onChange} disabled={disabled}>
       <SelectTrigger
+        ref={triggerRef}
         size="sm"
         className="max-w-48 shrink justify-start overflow-hidden border-0 bg-transparent px-2 text-[12px] font-medium text-muted-foreground hover:bg-muted hover:text-foreground sm:max-w-56 sm:px-3"
         title={selectedLabel || "Model"}
@@ -1060,14 +1812,89 @@ function PermissionSelect({
 function CodexItem({ item }: { item: CodexThreadItem }) {
   if (item.type === "userMessage") {
     const content = Array.isArray(item.content) ? item.content : [];
-    const text = content
-      .filter((part) => part.type === "text" && typeof part.text === "string")
-      .map((part) => part.text)
+    const textParts = content.flatMap((part) =>
+      part.type === "text" && "text" in part && typeof part.text === "string"
+        ? [part.text]
+        : [],
+    );
+    const text = textParts
+      .filter((value) => !isAttachedPathsBlock(value))
       .join("\n");
+    const pathBlocks = textParts.flatMap((textPart) =>
+      parseAttachedPaths(textPart),
+    );
+    const images: Array<
+      { type: "image"; url: string } | { type: "localImage"; path: string }
+    > = [];
+    for (const part of content) {
+      if (part.type === "image" && "url" in part && typeof part.url === "string") {
+        images.push({ type: "image", url: part.url });
+      }
+      if (
+        part.type === "localImage" &&
+        "path" in part &&
+        typeof part.path === "string"
+      ) {
+        images.push({ type: "localImage", path: part.path });
+      }
+    }
     return (
       <Message from="user">
         <MessageContent>
-          <p className="whitespace-pre-wrap wrap-break-word">{text}</p>
+          <div className="grid gap-2">
+            {text ? (
+              <p className="whitespace-pre-wrap wrap-break-word">{text}</p>
+            ) : null}
+            {pathBlocks.length > 0 || images.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {pathBlocks.map((attachment) => (
+                  <span
+                    key={`${attachment.path}-${attachment.kind}`}
+                    className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/70 bg-background/60 px-2 py-1 text-[11px]"
+                  >
+                    <HugeiconsIcon
+                      icon={
+                        attachment.kind === "folder"
+                          ? Folder01Icon
+                          : FileAttachmentIcon
+                      }
+                      size={12}
+                      strokeWidth={1.75}
+                      className="shrink-0 text-muted-foreground"
+                    />
+                    <span className="min-w-0 truncate font-mono">
+                      {attachment.path}
+                    </span>
+                  </span>
+                ))}
+                {images.map((image, index) =>
+                  image.type === "image" ? (
+                    <img
+                      key={`image-${index}`}
+                      src={image.url}
+                      alt="Attached image"
+                      className="max-h-28 max-w-44 rounded-md border border-border/70 object-contain"
+                    />
+                  ) : (
+                    <span
+                      key={`local-image-${index}`}
+                      className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/70 bg-background/60 px-2 py-1 text-[11px]"
+                    >
+                      <HugeiconsIcon
+                        icon={Image02Icon}
+                        size={12}
+                        strokeWidth={1.75}
+                        className="shrink-0 text-muted-foreground"
+                      />
+                      <span className="min-w-0 truncate font-mono">
+                        {image.path}
+                      </span>
+                    </span>
+                  ),
+                )}
+              </div>
+            ) : null}
+          </div>
         </MessageContent>
       </Message>
     );
@@ -1446,6 +2273,179 @@ function PendingUserInputPanel({
   );
 }
 
+export function codexInputFromComposer(
+  text: string,
+  attachments: CodexAttachment[],
+): CodexUserInput[] {
+  const input: CodexUserInput[] = [];
+  const paths = attachments.filter(
+    (attachment): attachment is Extract<CodexAttachment, { kind: "path" }> =>
+      attachment.kind === "path",
+  );
+  if (paths.length > 0) {
+    input.push({
+      type: "text",
+      text: [
+        "Attached paths:",
+        ...paths.map((attachment) => {
+          const kind =
+            attachment.pathKind === "folder"
+              ? "folder"
+              : attachment.pathKind === "file"
+                ? "file"
+                : "path";
+          return `- ${attachment.path} (${kind})`;
+        }),
+      ].join("\n"),
+      text_elements: [],
+    });
+  }
+  for (const attachment of attachments) {
+    if (attachment.kind === "localImage") {
+      input.push({
+        type: "localImage",
+        path: attachment.path,
+        detail: "high",
+      });
+    } else if (attachment.kind === "image") {
+      input.push({
+        type: "image",
+        url: attachment.url,
+        detail: "high",
+      });
+    }
+  }
+  if (text.trim()) {
+    input.push({ type: "text", text: text.trim(), text_elements: [] });
+  }
+  return input;
+}
+
+function normalizeThreadList(response: unknown): CodexThreadListItem[] {
+  const record = asObject(response);
+  const raw = Array.isArray(record.threads)
+    ? record.threads
+    : Array.isArray(record.data)
+      ? record.data
+      : [];
+  return raw.flatMap((item) => {
+    const session = asObject(item);
+    const id = stringField(session.id);
+    return id ? [{ ...session, id } as CodexThreadListItem] : [];
+  });
+}
+
+async function createPathAttachment(path: string): Promise<CodexAttachment> {
+  const name = basename(path);
+  if (isImagePath(path)) {
+    return { id: `local-image:${path}`, kind: "localImage", path, name };
+  }
+  const pathKind = await statPathKind(path);
+  return { id: `path:${path}`, kind: "path", path, pathKind };
+}
+
+async function createImageAttachment(file: File): Promise<CodexAttachment> {
+  const url = await readAsDataURL(file);
+  return {
+    id: `image:${file.name}:${file.size}:${file.lastModified}`,
+    kind: "image",
+    url,
+    name: file.name || "Pasted image",
+  };
+}
+
+function appendAttachment(
+  current: CodexAttachment[],
+  attachment: CodexAttachment,
+): CodexAttachment[] {
+  if (current.some((item) => item.id === attachment.id)) return current;
+  return [...current, attachment];
+}
+
+async function statPathKind(path: string): Promise<"file" | "folder" | "path"> {
+  try {
+    const stat = await invoke<{ kind?: string }>("fs_stat", {
+      path,
+      workspace: currentWorkspaceEnv(),
+    });
+    if (stat.kind === "dir") return "folder";
+    if (stat.kind === "file" || stat.kind === "symlink") return "file";
+  } catch {
+    // Keep the attachment as a path if metadata is unavailable.
+  }
+  return "path";
+}
+
+function readAsDataURL(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function isImagePath(path: string): boolean {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
+function basename(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized.split("/").filter(Boolean).pop() ?? path;
+}
+
+function isAttachedPathsBlock(text: string): boolean {
+  return text.trimStart().startsWith("Attached paths:\n");
+}
+
+function parseAttachedPaths(
+  text: string,
+): Array<{ path: string; kind: "file" | "folder" | "path" }> {
+  if (!isAttachedPathsBlock(text)) return [];
+  return text
+    .split("\n")
+    .slice(1)
+    .flatMap((line) => {
+      const match = line.match(/^- (.+) \((file|folder|path)\)$/);
+      if (!match) return [];
+      return [{ path: match[1], kind: match[2] as "file" | "folder" | "path" }];
+    });
+}
+
+function sessionTitle(session: CodexThreadListItem): string {
+  return (
+    stringField(session.title) ??
+    stringField(session.preview) ??
+    `Session ${shortThreadId(session.id)}`
+  );
+}
+
+function formatSessionUpdated(session: CodexThreadListItem): string {
+  const value = session.updatedAt ?? session.updated_at;
+  if (typeof value !== "string" && typeof value !== "number") return "Updated unknown";
+  const date = new Date(typeof value === "number" && value < 10_000_000_000 ? value * 1000 : value);
+  if (Number.isNaN(date.getTime())) return "Updated unknown";
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function sessionSource(session: CodexThreadListItem): string {
+  return (
+    stringField(session.source) ??
+    stringField(session.threadSource) ??
+    "Codex"
+  );
+}
+
+function shortThreadId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 6)}...${id.slice(-4)}` : id;
+}
+
 function flattenThreadItems(turns: unknown): CodexThreadItem[] {
   if (!Array.isArray(turns)) return [];
   return turns.flatMap((turn) => {
@@ -1463,5 +2463,9 @@ function flattenThreadItems(turns: unknown): CodexThreadItem[] {
 }
 
 function stringParam(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function stringField(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
