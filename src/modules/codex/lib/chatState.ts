@@ -331,6 +331,14 @@ export function codexEventThreadId(event: CodexEvent): string | null {
   return stringValue(thread.id);
 }
 
+export function shouldApplyCodexEvent(
+  activeThreadId: string | null,
+  event: CodexEvent,
+): boolean {
+  if (!activeThreadId) return false;
+  return codexEventThreadId(event) === activeThreadId;
+}
+
 export function codexApprovalResult(
   request: Pick<CodexPendingRequest, "method" | "params">,
   action: "accept" | "acceptForSession" | "decline" | "cancel" | "allowTurn" | "allowSession",

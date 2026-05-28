@@ -103,6 +103,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
@@ -187,6 +188,7 @@ pub fn run() {
             codex::codex_logout,
             codex::codex_account_switch,
             codex::codex_account_create,
+            codex::codex_debug_status,
             codex::codex_app_request,
             codex::codex_app_respond,
             secrets::secrets_get,

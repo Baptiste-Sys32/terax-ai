@@ -38,4 +38,19 @@ describe("codexInputFromComposer", () => {
       { type: "text", text: "Explain this", text_elements: [] },
     ]);
   });
+
+  it("allows image-only sends", () => {
+    const attachments: CodexAttachment[] = [
+      {
+        id: "local-image:/repo/screen.png",
+        kind: "localImage",
+        path: "/repo/screen.png",
+        name: "screen.png",
+      },
+    ];
+
+    expect(codexInputFromComposer("", attachments)).toEqual([
+      { type: "localImage", path: "/repo/screen.png", detail: "high" },
+    ]);
+  });
 });

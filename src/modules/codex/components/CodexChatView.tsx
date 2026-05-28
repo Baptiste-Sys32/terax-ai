@@ -39,7 +39,6 @@ import {
   type CodexPermissionMode,
   type CodexReasoningEffort,
   type CodexStatus,
-  type CodexThreadListItem,
   type CodexThreadLoadResponse,
   type CodexThreadStartResponse,
   type CodexUserInput,
@@ -48,17 +47,27 @@ import {
   CODEX_PERMISSION_PRESETS,
   REASONING_LABELS,
   codexApprovalResult,
-  codexEventThreadId,
   createInitialCodexChatState,
   mergeThreadItems,
   reduceCodexEvent,
+  shouldApplyCodexEvent,
   type CodexChatState,
   type CodexPendingRequest,
   type CodexThreadItem,
 } from "@/modules/codex/lib/chatState";
+import {
+  formatSessionUpdatedMs,
+  normalizeThreadListPayload,
+  shortThreadId,
+  type NormalizedCodexSession,
+} from "@/modules/codex/lib/sessionPayload";
 import { openSettingsWindow } from "@/modules/settings/openSettingsWindow";
 import type { CodexTab } from "@/modules/tabs";
 import { currentWorkspaceEnv } from "@/modules/workspace";
+import {
+  createPreviewBlobUrl,
+  readPreviewFile,
+} from "@/modules/editor/lib/mediaPreview";
 import {
   AiBrain04Icon,
   Add01Icon,
@@ -77,6 +86,7 @@ import {
   SquareIcon,
 } from "@hugeicons/core-free-icons";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ClipboardEvent,
@@ -85,8 +95,10 @@ import {
   KeyboardEvent,
   MouseEvent,
   Ref,
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useMemo,
   useReducer,
   useRef,
@@ -96,6 +108,14 @@ import { CodexLogo } from "./CodexLogo";
 
 type Props = {
   tab: CodexTab;
+  onStateChange?: (tabId: number, state: NonNullable<CodexTab["codex"]>) => void;
+};
+
+export type CodexPaneHandle = {
+  resumeRecent: () => void;
+  forkCurrent: () => void;
+  clearCurrent: () => void;
+  copyResumeId: () => void;
 };
 
 type CodexSlashNotice = {
@@ -110,6 +130,7 @@ export type CodexAttachment =
       kind: "path";
       path: string;
       pathKind: "file" | "folder" | "path";
+      statError?: string;
     }
   | {
       id: string;
@@ -125,10 +146,10 @@ export type CodexAttachment =
     };
 
 type SessionBrowserState =
-  | { status: "closed"; sessions: CodexThreadListItem[] }
-  | { status: "loading"; sessions: CodexThreadListItem[] }
-  | { status: "loaded"; sessions: CodexThreadListItem[] }
-  | { status: "error"; sessions: CodexThreadListItem[]; message: string };
+  | { status: "closed"; sessions: NormalizedCodexSession[] }
+  | { status: "loading"; sessions: NormalizedCodexSession[] }
+  | { status: "loaded"; sessions: NormalizedCodexSession[] }
+  | { status: "error"; sessions: NormalizedCodexSession[]; message: string };
 
 const DEFAULT_CODEX_MODEL = "gpt-5.5";
 const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffort = "low";
@@ -315,25 +336,35 @@ function normalizeCodexModels(models: CodexModel[]): CodexModel[] {
     });
 }
 
-export function CodexChatView({ tab }: Props) {
-  const [state, dispatch] = useReducer(chatReducer, undefined, () =>
-    createInitialCodexChatState(),
-  );
+export const CodexChatView = forwardRef<CodexPaneHandle, Props>(
+  function CodexChatView({ tab, onStateChange }, ref) {
+  const [state, dispatch] = useReducer(chatReducer, undefined, () => ({
+    ...createInitialCodexChatState(),
+    threadId: tab.codex?.threadId ?? null,
+    cwd: tab.codex?.cwd ?? tab.cwd ?? null,
+  }));
   const stateRef = useRef(state);
+  const codexUidRef = useRef(
+    tab.codex?.uid ?? `codex-${tab.id}-${Date.now()}`,
+  );
+  const restoreAttemptRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelButtonRef = useRef<HTMLButtonElement>(null);
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [models, setModels] = useState<CodexModel[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_CODEX_MODEL);
+  const [selectedModel, setSelectedModel] = useState<string>(
+    tab.codex?.selectedModel || DEFAULT_CODEX_MODEL,
+  );
   const [effort, setEffort] = useState<CodexReasoningEffort>(
-    DEFAULT_CODEX_REASONING_EFFORT,
+    tab.codex?.effort ?? DEFAULT_CODEX_REASONING_EFFORT,
   );
   const [permissionMode, setPermissionMode] =
-    useState<CodexPermissionMode>("default");
+    useState<CodexPermissionMode>(tab.codex?.permissionMode ?? "default");
   const [prompt, setPrompt] = useState("");
   const [slashNotice, setSlashNotice] = useState<CodexSlashNotice | null>(null);
   const [attachments, setAttachments] = useState<CodexAttachment[]>([]);
+  const [dropActive, setDropActive] = useState(false);
   const [sessionBrowser, setSessionBrowser] = useState<SessionBrowserState>({
     status: "closed",
     sessions: [],
@@ -436,9 +467,7 @@ export function CodexChatView({ tab }: Props) {
         void refreshStatusAndModels();
         return;
       }
-      const threadId = stateRef.current.threadId;
-      const eventThreadId = codexEventThreadId(event);
-      if (!threadId || eventThreadId !== threadId) return;
+      if (!shouldApplyCodexEvent(stateRef.current.threadId, event)) return;
       dispatch({ type: "event", event });
     }).then((fn) => {
       if (disposed) fn();
@@ -598,7 +627,7 @@ export function CodexChatView({ tab }: Props) {
         sortDirection: "desc",
         archived: false,
       });
-      const sessions = normalizeThreadList(response);
+      const sessions = normalizeThreadListPayload(response);
       setSessionBrowser({ status: "loaded", sessions });
       setSlashNotice(null);
     } catch (error) {
@@ -647,6 +676,16 @@ export function CodexChatView({ tab }: Props) {
       tab.cwd,
     ],
   );
+
+  useEffect(() => {
+    const restoredThreadId = tab.codex?.threadId;
+    if (!restoredThreadId) return;
+    if (!loggedIn || sending) return;
+    if (state.items.length > 0) return;
+    if (restoreAttemptRef.current === restoredThreadId) return;
+    restoreAttemptRef.current = restoredThreadId;
+    void resumeThread(restoredThreadId);
+  }, [loggedIn, resumeThread, sending, state.items.length, tab.codex?.threadId]);
 
   const forkThread = useCallback(async () => {
     if (running) {
@@ -897,7 +936,6 @@ export function CodexChatView({ tab }: Props) {
         sessions: browser.sessions,
       }));
       setPrompt("");
-      setAttachments([]);
       try {
         let threadId = stateRef.current.threadId;
         if (!threadId) {
@@ -929,6 +967,7 @@ export function CodexChatView({ tab }: Props) {
           turnId: turn.turn.id,
           items: flattenThreadItems([turn.turn]),
         });
+        setAttachments([]);
       } catch (error) {
         setPrompt(text);
         setAttachments(attachments);
@@ -987,6 +1026,24 @@ export function CodexChatView({ tab }: Props) {
       next.reduce((acc, attachment) => appendAttachment(acc, attachment), current),
     );
   }, []);
+
+  const pickAttachments = useCallback(
+    async (directory: boolean) => {
+      try {
+        const picked = await openDialog({
+          multiple: true,
+          directory,
+        });
+        const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+        const attachments = await Promise.all(paths.map(createPathAttachment));
+        queueAttachments(attachments);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      } catch (error) {
+        dispatch({ type: "error", message: String(error) });
+      }
+    },
+    [queueAttachments],
+  );
 
   const readSystemClipboardImages = useCallback(async () => {
     const result = await readClipboardAttachments();
@@ -1089,10 +1146,22 @@ export function CodexChatView({ tab }: Props) {
     event.dataTransfer.dropEffect = "copy";
   }, []);
 
+  const handleDragEnter = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!hasCodexDropPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    setDropActive(true);
+  }, []);
+
+  const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDropActive(false);
+  }, []);
+
   const handleDrop = useCallback(
     (event: DragEvent<HTMLDivElement>) => {
       if (!hasCodexDropPayload(event.dataTransfer)) return;
       event.preventDefault();
+      setDropActive(false);
       void codexAttachmentsFromDrop(event.dataTransfer).then((result) => {
         queueAttachments(result.attachments);
         const text = result.text;
@@ -1133,6 +1202,52 @@ export function CodexChatView({ tab }: Props) {
       }
     },
     [],
+  );
+
+  useEffect(() => {
+    onStateChange?.(tab.id, {
+      uid: codexUidRef.current,
+      threadId: state.threadId,
+      cwd: state.cwd ?? tab.cwd ?? null,
+      selectedModel,
+      effort,
+      permissionMode,
+      updatedAt: Date.now(),
+    });
+  }, [
+    effort,
+    onStateChange,
+    permissionMode,
+    selectedModel,
+    state.cwd,
+    state.threadId,
+    tab.cwd,
+    tab.id,
+  ]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      resumeRecent: () => void openSessionBrowser(),
+      forkCurrent: () => void forkThread(),
+      clearCurrent: () => void startFreshThread({ source: "clear", silent: true }),
+      copyResumeId: () => {
+        const threadId = stateRef.current.threadId;
+        if (!threadId) {
+          setSlashNotice({
+            title: "Resume id",
+            rows: [{ label: "Status", value: "No active Codex session." }],
+          });
+          return;
+        }
+        void navigator.clipboard?.writeText(threadId);
+        setSlashNotice({
+          title: "Resume id",
+          rows: [{ label: "Copied", value: threadId }],
+        });
+      },
+    }),
+    [forkThread, openSessionBrowser, startFreshThread],
   );
 
   return (
@@ -1218,8 +1333,13 @@ export function CodexChatView({ tab }: Props) {
             />
           ) : null}
           <div
-            className="rounded-[22px] p-px transition-colors focus-within:bg-ring/30"
+            className={cn(
+              "rounded-[22px] p-px transition-colors focus-within:bg-ring/30",
+              dropActive && "bg-ring/40",
+            )}
+            onDragEnter={handleDragEnter}
             onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
             <div className="overflow-hidden rounded-[20px] border border-border bg-card">
@@ -1281,6 +1401,32 @@ export function CodexChatView({ tab }: Props) {
                   >
                     <HugeiconsIcon icon={Add01Icon} size={14} strokeWidth={1.9} />
                   </Button>
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    title="Attach files"
+                    disabled={!installed || !loggedIn || !!activePending}
+                    onClick={() => void pickAttachments(false)}
+                    className="size-7 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                  >
+                    <HugeiconsIcon
+                      icon={FileAttachmentIcon}
+                      size={14}
+                      strokeWidth={1.9}
+                    />
+                  </Button>
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    title="Attach folders"
+                    disabled={!installed || !loggedIn || !!activePending}
+                    onClick={() => void pickAttachments(true)}
+                    className="size-7 shrink-0 rounded-full text-muted-foreground hover:text-foreground"
+                  >
+                    <HugeiconsIcon icon={Folder01Icon} size={14} strokeWidth={1.9} />
+                  </Button>
                   <div className="mx-1 h-5 w-px shrink-0 bg-border/70" />
                   <ModelSelect
                     models={models}
@@ -1337,7 +1483,8 @@ export function CodexChatView({ tab }: Props) {
       </div>
     </div>
   );
-}
+  },
+);
 
 function EmptyState({
   loggedIn,
@@ -1516,7 +1663,7 @@ function SessionBrowserPanel({
               >
                 <div className="flex min-w-0 items-center gap-2">
                   <span className="min-w-0 flex-1 truncate text-[12px] font-medium">
-                    {sessionTitle(session)}
+                    {session.title}
                   </span>
                   <span className="shrink-0 font-mono text-[10.5px] text-muted-foreground">
                     {shortThreadId(id)}
@@ -1524,10 +1671,10 @@ function SessionBrowserPanel({
                 </div>
                 <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-muted-foreground">
                   <span className="min-w-0 max-w-full truncate font-mono">
-                    {stringField(session.cwd) ?? "No cwd"}
+                    {session.cwd ?? "No cwd"}
                   </span>
-                  <span>{formatSessionUpdated(session)}</span>
-                  <span>{sessionSource(session)}</span>
+                  <span>{formatSessionUpdatedMs(session.updatedAtMs)}</span>
+                  <span>{session.source}</span>
                 </div>
               </button>
             );
@@ -1579,15 +1726,31 @@ function AttachmentChip({
       : attachment.kind === "localImage"
         ? attachment.name
         : attachment.path;
+  const warning =
+    attachment.kind === "path" && attachment.statError
+      ? `Metadata unavailable: ${attachment.statError}`
+      : null;
 
   return (
-    <span className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border border-border/70 bg-muted/35 px-2 text-[11px]">
+    <span
+      className={cn(
+        "inline-flex h-7 max-w-full items-center gap-1.5 rounded-md border px-2 text-[11px]",
+        attachment.kind === "path" && attachment.pathKind === "folder"
+          ? "border-sky-500/35 bg-sky-500/10"
+          : warning
+            ? "border-amber-500/40 bg-amber-500/10"
+            : "border-border/70 bg-muted/35",
+      )}
+      title={warning ?? undefined}
+    >
       {attachment.kind === "image" ? (
         <img
           src={attachment.url}
           alt=""
           className="size-4 rounded-sm object-cover"
         />
+      ) : attachment.kind === "localImage" ? (
+        <LocalImageThumb path={attachment.path} name={attachment.name} />
       ) : (
         <HugeiconsIcon
           icon={icon}
@@ -1597,6 +1760,11 @@ function AttachmentChip({
         />
       )}
       <span className="min-w-0 truncate font-mono">{label}</span>
+      {warning ? (
+        <span className="shrink-0 text-[10px] font-medium text-amber-700 dark:text-amber-300">
+          !
+        </span>
+      ) : null}
       <button
         type="button"
         className="ml-0.5 flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background hover:text-foreground"
@@ -1606,6 +1774,49 @@ function AttachmentChip({
         <HugeiconsIcon icon={Cancel01Icon} size={10} strokeWidth={1.8} />
       </button>
     </span>
+  );
+}
+
+function LocalImageThumb({ path, name }: { path: string; name: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    readPreviewFile(path)
+      .then((result) => {
+        if (cancelled || result.kind !== "preview" || result.previewType !== "image") {
+          return;
+        }
+        objectUrl = createPreviewBlobUrl(result.dataBase64, result.mediaType);
+        setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setUrl(null);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [path]);
+
+  if (!url) {
+    return (
+      <HugeiconsIcon
+        icon={Image02Icon}
+        size={12}
+        strokeWidth={1.75}
+        className="shrink-0 text-muted-foreground"
+      />
+    );
+  }
+
+  return (
+    <img
+      src={url}
+      alt={name}
+      className="size-4 shrink-0 rounded-sm object-cover"
+    />
   );
 }
 
@@ -1960,11 +2171,9 @@ function CodexItem({ item }: { item: CodexThreadItem }) {
                       key={`local-image-${index}`}
                       className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/70 bg-background/60 px-2 py-1 text-[11px]"
                     >
-                      <HugeiconsIcon
-                        icon={Image02Icon}
-                        size={12}
-                        strokeWidth={1.75}
-                        className="shrink-0 text-muted-foreground"
+                      <LocalImageThumb
+                        path={image.path}
+                        name={basename(image.path)}
                       />
                       <span className="min-w-0 truncate font-mono">
                         {image.path}
@@ -2401,27 +2610,19 @@ export function codexInputFromComposer(
   return input;
 }
 
-function normalizeThreadList(response: unknown): CodexThreadListItem[] {
-  const record = asObject(response);
-  const raw = Array.isArray(record.threads)
-    ? record.threads
-    : Array.isArray(record.data)
-      ? record.data
-      : [];
-  return raw.flatMap((item) => {
-    const session = asObject(item);
-    const id = stringField(session.id);
-    return id ? [{ ...session, id } as CodexThreadListItem] : [];
-  });
-}
-
 async function createPathAttachment(path: string): Promise<CodexAttachment> {
   const name = basename(path);
   if (isImagePath(path)) {
     return { id: `local-image:${path}`, kind: "localImage", path, name };
   }
-  const pathKind = await statPathKind(path);
-  return { id: `path:${path}`, kind: "path", path, pathKind };
+  const stat = await statPathKind(path);
+  return {
+    id: `path:${path}`,
+    kind: "path",
+    path,
+    pathKind: stat.pathKind,
+    ...(stat.error && { statError: stat.error }),
+  };
 }
 
 type ImageBlobPayload = {
@@ -2463,18 +2664,22 @@ function appendAttachment(
   return [...current, attachment];
 }
 
-async function statPathKind(path: string): Promise<"file" | "folder" | "path"> {
+async function statPathKind(
+  path: string,
+): Promise<{ pathKind: "file" | "folder" | "path"; error?: string }> {
   try {
     const stat = await invoke<{ kind?: string }>("fs_stat", {
       path,
       workspace: currentWorkspaceEnv(),
     });
-    if (stat.kind === "dir") return "folder";
-    if (stat.kind === "file" || stat.kind === "symlink") return "file";
-  } catch {
-    // Keep the attachment as a path if metadata is unavailable.
+    if (stat.kind === "dir") return { pathKind: "folder" };
+    if (stat.kind === "file" || stat.kind === "symlink") {
+      return { pathKind: "file" };
+    }
+  } catch (error) {
+    return { pathKind: "path", error: String(error) };
   }
-  return "path";
+  return { pathKind: "path" };
 }
 
 function readAsDataURL(file: Blob): Promise<string> {
@@ -2666,39 +2871,6 @@ function parseAttachedPaths(
       if (!match) return [];
       return [{ path: match[1], kind: match[2] as "file" | "folder" | "path" }];
     });
-}
-
-function sessionTitle(session: CodexThreadListItem): string {
-  return (
-    stringField(session.title) ??
-    stringField(session.preview) ??
-    `Session ${shortThreadId(session.id)}`
-  );
-}
-
-function formatSessionUpdated(session: CodexThreadListItem): string {
-  const value = session.updatedAt ?? session.updated_at;
-  if (typeof value !== "string" && typeof value !== "number") return "Updated unknown";
-  const date = new Date(typeof value === "number" && value < 10_000_000_000 ? value * 1000 : value);
-  if (Number.isNaN(date.getTime())) return "Updated unknown";
-  return date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function sessionSource(session: CodexThreadListItem): string {
-  return (
-    stringField(session.source) ??
-    stringField(session.threadSource) ??
-    "Codex"
-  );
-}
-
-function shortThreadId(id: string): string {
-  return id.length > 12 ? `${id.slice(0, 6)}...${id.slice(-4)}` : id;
 }
 
 function flattenThreadItems(turns: unknown): CodexThreadItem[] {

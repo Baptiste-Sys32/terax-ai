@@ -4,6 +4,7 @@ import {
   codexApprovalResult,
   createInitialCodexChatState,
   reduceCodexEvent,
+  shouldApplyCodexEvent,
   type CodexPendingRequest,
 } from "./chatState";
 
@@ -157,6 +158,26 @@ describe("codexApprovalResult", () => {
       scope: "turn",
       strictAutoReview: true,
     });
+  });
+});
+
+describe("shouldApplyCodexEvent", () => {
+  it("rejects events for stale threads after switching", () => {
+    expect(
+      shouldApplyCodexEvent("thread-new", {
+        method: "item/agentMessage/delta",
+        params: { threadId: "thread-old", itemId: "msg-1", delta: "stale" },
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts nested thread ids from active thread events", () => {
+    expect(
+      shouldApplyCodexEvent("thread-new", {
+        method: "thread/started",
+        params: { thread: { id: "thread-new" } },
+      }),
+    ).toBe(true);
   });
 });
 
