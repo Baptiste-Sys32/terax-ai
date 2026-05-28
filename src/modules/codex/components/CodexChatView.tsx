@@ -80,7 +80,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   ClipboardEvent,
+  DragEvent,
   FormEvent,
+  KeyboardEvent,
+  MouseEvent,
   Ref,
   useCallback,
   useEffect,
@@ -978,20 +981,131 @@ export function CodexChatView({ tab }: Props) {
     );
   }, []);
 
-  const handlePaste = useCallback((event: ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(event.clipboardData.files ?? []).filter((file) =>
-      file.type.startsWith("image/"),
-    );
-    if (files.length === 0) return;
-    event.preventDefault();
-    void Promise.all(files.map((file) => createImageAttachment(file))).then(
-      (next) => {
-        setAttachments((current) =>
-          next.reduce((acc, attachment) => appendAttachment(acc, attachment), current),
-        );
-      },
+  const queueAttachments = useCallback((next: CodexAttachment[]) => {
+    if (next.length === 0) return;
+    setAttachments((current) =>
+      next.reduce((acc, attachment) => appendAttachment(acc, attachment), current),
     );
   }, []);
+
+  const readSystemClipboardImages = useCallback(async () => {
+    const result = await readClipboardAttachments();
+    if (result.attachments.length > 0) queueAttachments(result.attachments);
+  }, [queueAttachments]);
+
+  const readSystemClipboard = useCallback(async () => {
+    const result = await readClipboardAttachments();
+    if (result.attachments.length > 0) queueAttachments(result.attachments);
+    const text = result.text;
+    if (text) {
+      setPrompt((current) => insertTextAtTextarea(current, text, textareaRef.current));
+    }
+  }, [queueAttachments]);
+
+  const handlePaste = useCallback(
+    (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const payload = attachmentsFromClipboardData(event.clipboardData);
+      if (payload.length === 0) {
+        window.setTimeout(() => void readSystemClipboardImages(), 0);
+        return;
+      }
+      event.preventDefault();
+      void Promise.all(payload.map((item) => createImageAttachment(item.blob, item.name))).then(
+        queueAttachments,
+      );
+    },
+    [queueAttachments, readSystemClipboardImages],
+  );
+
+  const handleComposerKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLTextAreaElement>) => {
+      const pasteChord =
+        event.key.toLowerCase() === "v" && (event.ctrlKey || event.metaKey);
+      if (pasteChord) {
+        window.setTimeout(() => void readSystemClipboardImages(), 0);
+      }
+
+      if (showSlashCommands) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          setSlashIndex((index) => (index + 1) % slashCommands.length);
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          setSlashIndex(
+            (index) =>
+              (index - 1 + slashCommands.length) %
+              slashCommands.length,
+          );
+          return;
+        }
+        if (event.key === "Tab") {
+          event.preventDefault();
+          const command = slashCommands[slashIndex];
+          if (command) pickSlashCommand(command);
+          return;
+        }
+      }
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        if (showSlashCommands) {
+          const exact = slashCommands.find(
+            (command) => command.invocation === prompt.trim(),
+          );
+          if (exact) {
+            void submitPrompt();
+            return;
+          }
+          const command = slashCommands[slashIndex];
+          if (command) pickSlashCommand(command);
+          return;
+        }
+        void submitPrompt();
+      }
+    },
+    [
+      pickSlashCommand,
+      prompt,
+      readSystemClipboardImages,
+      showSlashCommands,
+      slashCommands,
+      slashIndex,
+      submitPrompt,
+    ],
+  );
+
+  const handleAuxClick = useCallback(
+    (event: MouseEvent<HTMLTextAreaElement>) => {
+      if (event.button !== 1) return;
+      void readSystemClipboard();
+    },
+    [readSystemClipboard],
+  );
+
+  const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!hasCodexDropPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const handleDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!hasCodexDropPayload(event.dataTransfer)) return;
+      event.preventDefault();
+      void codexAttachmentsFromDrop(event.dataTransfer).then((result) => {
+        queueAttachments(result.attachments);
+        const text = result.text;
+        if (text) {
+          setPrompt((current) =>
+            insertTextAtTextarea(current, text, textareaRef.current),
+          );
+        }
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      });
+    },
+    [queueAttachments],
+  );
 
   const respondToRequest = useCallback(
     async (
@@ -1103,7 +1217,11 @@ export function CodexChatView({ tab }: Props) {
               }
             />
           ) : null}
-          <div className="rounded-[22px] p-px transition-colors focus-within:bg-ring/30">
+          <div
+            className="rounded-[22px] p-px transition-colors focus-within:bg-ring/30"
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+          >
             <div className="overflow-hidden rounded-[20px] border border-border bg-card">
               {activePending ? (
                 <div className="border-b border-border/60 bg-muted/20">
@@ -1122,46 +1240,8 @@ export function CodexChatView({ tab }: Props) {
                   value={prompt}
                   onChange={(event) => setPrompt(event.target.value)}
                   onPaste={handlePaste}
-                  onKeyDown={(event) => {
-                    if (showSlashCommands) {
-                      if (event.key === "ArrowDown") {
-                        event.preventDefault();
-                        setSlashIndex((index) => (index + 1) % slashCommands.length);
-                        return;
-                      }
-                      if (event.key === "ArrowUp") {
-                        event.preventDefault();
-                        setSlashIndex(
-                          (index) =>
-                            (index - 1 + slashCommands.length) %
-                            slashCommands.length,
-                        );
-                        return;
-                      }
-                      if (event.key === "Tab") {
-                        event.preventDefault();
-                        const command = slashCommands[slashIndex];
-                        if (command) pickSlashCommand(command);
-                        return;
-                      }
-                    }
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      if (showSlashCommands) {
-                        const exact = slashCommands.find(
-                          (command) => command.invocation === prompt.trim(),
-                        );
-                        if (exact) {
-                          void submitPrompt();
-                          return;
-                        }
-                        const command = slashCommands[slashIndex];
-                        if (command) pickSlashCommand(command);
-                        return;
-                      }
-                      void submitPrompt();
-                    }
-                  }}
+                  onKeyDown={handleComposerKeyDown}
+                  onAuxClick={handleAuxClick}
                   placeholder={
                     loggedIn
                       ? "Ask Codex to work in this repository..."
@@ -2344,13 +2424,28 @@ async function createPathAttachment(path: string): Promise<CodexAttachment> {
   return { id: `path:${path}`, kind: "path", path, pathKind };
 }
 
-async function createImageAttachment(file: File): Promise<CodexAttachment> {
-  const url = await readAsDataURL(file);
+type ImageBlobPayload = {
+  blob: Blob;
+  name: string;
+  idHint?: string;
+};
+
+type ClipboardReadResult = {
+  attachments: CodexAttachment[];
+  text: string | null;
+};
+
+async function createImageAttachment(
+  blob: Blob,
+  name = "Pasted image",
+  idHint?: string,
+): Promise<CodexAttachment> {
+  const url = await readAsDataURL(blob);
   return {
-    id: `image:${file.name}:${file.size}:${file.lastModified}`,
+    id: `image:${idHint ?? name}:${blob.size}:${await hashBlobPrefix(blob)}`,
     kind: "image",
     url,
-    name: file.name || "Pasted image",
+    name,
   };
 }
 
@@ -2383,6 +2478,138 @@ function readAsDataURL(file: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error);
     reader.readAsDataURL(file);
   });
+}
+
+function attachmentsFromClipboardData(data: DataTransfer): ImageBlobPayload[] {
+  const fromItems = Array.from(data.items ?? []).flatMap((item, index) => {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) return [];
+    const file = item.getAsFile();
+    return file
+      ? [{ blob: file, name: file.name || `Pasted image ${index + 1}` }]
+      : [];
+  });
+  if (fromItems.length > 0) return fromItems;
+  return Array.from(data.files ?? []).flatMap((file) =>
+    file.type.startsWith("image/")
+      ? [{ blob: file, name: file.name || "Pasted image" }]
+      : [],
+  );
+}
+
+async function readClipboardAttachments(): Promise<ClipboardReadResult> {
+  const attachments: CodexAttachment[] = [];
+  const clipboard = navigator.clipboard;
+  if (!clipboard) return { attachments, text: null };
+
+  try {
+    if ("read" in clipboard && typeof clipboard.read === "function") {
+      const items = await clipboard.read();
+      for (const item of items) {
+        const imageType = item.types.find((type) => type.startsWith("image/"));
+        if (!imageType) continue;
+        const blob = await item.getType(imageType);
+        attachments.push(
+          await createImageAttachment(blob, "Clipboard image", `clipboard:${imageType}`),
+        );
+      }
+    }
+  } catch {
+    // Clipboard image reads are permission/platform dependent in WebKitGTK.
+  }
+
+  let text: string | null = null;
+  try {
+    if (typeof clipboard.readText === "function") {
+      const value = await clipboard.readText();
+      text = value.trim().length > 0 ? value : null;
+    }
+  } catch {
+    // Text reads may be denied when the call is not considered user-initiated.
+  }
+
+  return { attachments, text };
+}
+
+function hasCodexDropPayload(data: DataTransfer): boolean {
+  return (
+    Array.from(data.files ?? []).length > 0 ||
+    Array.from(data.items ?? []).some(
+      (item) =>
+        item.kind === "file" ||
+        item.type === "text/uri-list" ||
+        item.type === "text/plain",
+    ) ||
+    Array.from(data.types ?? []).some(
+      (type) => type === "Files" || type === "text/uri-list",
+    )
+  );
+}
+
+async function codexAttachmentsFromDrop(
+  data: DataTransfer,
+): Promise<ClipboardReadResult> {
+  const attachments: CodexAttachment[] = [];
+
+  for (const file of Array.from(data.files ?? [])) {
+    if (file.type.startsWith("image/")) {
+      attachments.push(
+        await createImageAttachment(file, file.name || "Dropped image"),
+      );
+    }
+  }
+
+  const uriList = data.getData("text/uri-list");
+  const paths = parseDroppedPaths(uriList || data.getData("text/plain"));
+  for (const path of paths) {
+    attachments.push(await createPathAttachment(path));
+  }
+
+  const text =
+    attachments.length === 0 ? data.getData("text/plain") || null : null;
+  return { attachments, text };
+}
+
+function parseDroppedPaths(value: string): string[] {
+  if (!value.trim()) return [];
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .flatMap((line) => {
+      if (line.startsWith("file://")) {
+        try {
+          return [decodeURIComponent(new URL(line).pathname)];
+        } catch {
+          return [];
+        }
+      }
+      return line.startsWith("/") ? [line] : [];
+    });
+}
+
+function insertTextAtTextarea(
+  current: string,
+  text: string,
+  textarea: HTMLTextAreaElement | null,
+): string {
+  if (!textarea) return current ? `${current}${text}` : text;
+  const start = textarea.selectionStart ?? current.length;
+  const end = textarea.selectionEnd ?? current.length;
+  const next = `${current.slice(0, start)}${text}${current.slice(end)}`;
+  requestAnimationFrame(() => {
+    const position = start + text.length;
+    textarea.setSelectionRange(position, position);
+  });
+  return next;
+}
+
+async function hashBlobPrefix(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.slice(0, 1024).arrayBuffer());
+  let hash = 0;
+  for (const byte of bytes) {
+    hash = (hash * 31 + byte) >>> 0;
+  }
+  return hash.toString(16);
 }
 
 function isImagePath(path: string): boolean {
@@ -2455,11 +2682,55 @@ function flattenThreadItems(turns: unknown): CodexThreadItem[] {
     return items.flatMap((item) => {
       if (!item || typeof item !== "object") return [];
       const record = item as { id?: unknown; type?: unknown };
-      return typeof record.id === "string" && typeof record.type === "string"
-        ? [item as CodexThreadItem]
-        : [];
+      if (typeof record.id !== "string" || typeof record.type !== "string") {
+        return [];
+      }
+      return [normalizeLoadedThreadItem(item as Record<string, unknown>)];
     });
   });
+}
+
+function normalizeLoadedThreadItem(record: Record<string, unknown>): CodexThreadItem {
+  if (record.type === "userMessage") {
+    return {
+      ...(record as Extract<CodexThreadItem, { type: "userMessage" }>),
+      type: "userMessage",
+      id: String(record.id),
+      content: normalizeUserMessageContent(record),
+    };
+  }
+  return record as CodexThreadItem;
+}
+
+function normalizeUserMessageContent(record: Record<string, unknown>): CodexUserInput[] {
+  const content = Array.isArray(record.content) ? record.content : [];
+  const normalized = content.flatMap(normalizeUserInputPart);
+  if (normalized.length > 0) return normalized;
+  if (typeof record.message === "string" && record.message.length > 0) {
+    return [{ type: "text", text: record.message, text_elements: [] }];
+  }
+  return [];
+}
+
+function normalizeUserInputPart(part: unknown): CodexUserInput[] {
+  const record = asObject(part);
+  const type = stringField(record.type);
+  if ((type === "text" || type === "input_text") && typeof record.text === "string") {
+    return [{ type: "text", text: record.text, text_elements: [] }];
+  }
+  if (type === "image" && typeof record.url === "string") {
+    return [{ type: "image", url: record.url, detail: "high" }];
+  }
+  if (type === "localImage" && typeof record.path === "string") {
+    return [{ type: "localImage", path: record.path, detail: "high" }];
+  }
+  if (type === "local_image" && typeof record.path === "string") {
+    return [{ type: "localImage", path: record.path, detail: "high" }];
+  }
+  if (type === "input_image" && typeof record.image_url === "string") {
+    return [{ type: "image", url: record.image_url, detail: "high" }];
+  }
+  return [];
 }
 
 function stringParam(value: unknown): string | null {
