@@ -107,6 +107,22 @@ describe("reduceCodexEvent", () => {
       { id: "reasoning-1", type: "reasoning", summary: [], content: [] },
     ]);
   });
+
+  it("preserves cwd from started threads", () => {
+    const state = reduceCodexEvent(createInitialCodexChatState(), {
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "thread-1",
+          cwd: "/repo",
+          turns: [],
+        },
+      },
+    });
+
+    expect(state.threadId).toBe("thread-1");
+    expect(state.cwd).toBe("/repo");
+  });
 });
 
 describe("codexApprovalResult", () => {

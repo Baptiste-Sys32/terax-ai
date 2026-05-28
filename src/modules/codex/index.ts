@@ -72,6 +72,13 @@ export type CodexEvent = {
   params: unknown;
 };
 
+export type CodexUserInput =
+  | { type: "text"; text: string; text_elements?: unknown[] }
+  | { type: "image"; url: string; detail?: "low" | "high" | "auto" }
+  | { type: "localImage"; path: string; detail?: "low" | "high" | "auto" }
+  | { type: "skill"; [key: string]: unknown }
+  | { type: "mention"; [key: string]: unknown };
+
 export type CodexThreadStartResponse = {
   thread: {
     id: string;
@@ -84,6 +91,27 @@ export type CodexThreadStartResponse = {
   cwd?: string;
   reasoningEffort?: CodexReasoningEffort | null;
 };
+
+export type CodexThreadListItem = {
+  id: string;
+  title?: string | null;
+  preview?: string | null;
+  cwd?: string | null;
+  updatedAt?: string | number | null;
+  updated_at?: string | number | null;
+  source?: string | null;
+  threadSource?: string | null;
+  [key: string]: unknown;
+};
+
+export type CodexThreadListResponse = {
+  threads?: CodexThreadListItem[];
+  data?: CodexThreadListItem[];
+  nextCursor?: string | null;
+  [key: string]: unknown;
+};
+
+export type CodexThreadLoadResponse = CodexThreadStartResponse;
 
 export type CodexTurnStartResponse = {
   turn: {
@@ -144,6 +172,7 @@ export function codexThreadStart(input: {
   model?: string;
   approvalPolicy?: unknown;
   sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+  sessionStartSource?: "startup" | "clear";
 }): Promise<CodexThreadStartResponse> {
   return codexAppRequest<CodexThreadStartResponse>("thread/start", {
     cwd: input.cwd ?? null,
@@ -152,12 +181,54 @@ export function codexThreadStart(input: {
     sandbox: input.sandbox ?? null,
     serviceName: "terax",
     threadSource: "user",
+    sessionStartSource: input.sessionStartSource ?? null,
+  });
+}
+
+export function codexThreadList(input: {
+  limit?: number;
+  sortKey?: "updated_at" | "created_at";
+  sortDirection?: "asc" | "desc";
+  archived?: boolean;
+}): Promise<CodexThreadListResponse> {
+  return codexAppRequest<CodexThreadListResponse>("thread/list", input);
+}
+
+export function codexThreadResume(input: {
+  threadId: string;
+  cwd?: string;
+  model?: string;
+  approvalPolicy?: unknown;
+  sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+}): Promise<CodexThreadLoadResponse> {
+  return codexAppRequest<CodexThreadLoadResponse>("thread/resume", {
+    threadId: input.threadId,
+    cwd: input.cwd ?? null,
+    model: input.model ?? null,
+    approvalPolicy: input.approvalPolicy ?? null,
+    sandbox: input.sandbox ?? null,
+  });
+}
+
+export function codexThreadFork(input: {
+  threadId: string;
+  cwd?: string;
+  model?: string;
+  approvalPolicy?: unknown;
+  sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+}): Promise<CodexThreadLoadResponse> {
+  return codexAppRequest<CodexThreadLoadResponse>("thread/fork", {
+    threadId: input.threadId,
+    cwd: input.cwd ?? null,
+    model: input.model ?? null,
+    approvalPolicy: input.approvalPolicy ?? null,
+    sandbox: input.sandbox ?? null,
   });
 }
 
 export function codexTurnStart(input: {
   threadId: string;
-  text: string;
+  input: CodexUserInput[];
   cwd?: string;
   model?: string;
   effort?: CodexReasoningEffort | null;
@@ -165,7 +236,7 @@ export function codexTurnStart(input: {
 }): Promise<CodexTurnStartResponse> {
   return codexAppRequest<CodexTurnStartResponse>("turn/start", {
     threadId: input.threadId,
-    input: [{ type: "text", text: input.text, text_elements: [] }],
+    input: input.input,
     cwd: input.cwd ?? null,
     model: input.model ?? null,
     effort: input.effort ?? null,

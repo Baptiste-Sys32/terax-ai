@@ -2,13 +2,8 @@ import type {
   CodexEvent,
   CodexPermissionMode,
   CodexReasoningEffort,
+  CodexUserInput,
 } from "@/modules/codex";
-
-export type CodexUserInput = {
-  type: string;
-  text?: string;
-  [key: string]: unknown;
-};
 
 export type CodexThreadItem =
   | {
@@ -70,6 +65,7 @@ export type CodexPendingRequest = {
 export type CodexChatState = {
   threadId: string | null;
   turnId: string | null;
+  cwd: string | null;
   status: CodexRunStatus;
   items: CodexThreadItem[];
   pendingRequests: CodexPendingRequest[];
@@ -121,6 +117,7 @@ export function createInitialCodexChatState(): CodexChatState {
   return {
     threadId: null,
     turnId: null,
+    cwd: null,
     status: "idle",
     items: [],
     pendingRequests: [],
@@ -154,6 +151,7 @@ export function reduceCodexEvent(
       return {
         ...state,
         threadId,
+        cwd: stringValue(thread.cwd) ?? state.cwd,
         items: mergeTurns(state.items, thread.turns),
       };
     }
