@@ -1,11 +1,12 @@
 import { redo, undo } from "@codemirror/commands";
+import { forceLinting } from "@codemirror/lint";
 import {
   findNext,
   findPrevious,
   SearchQuery,
   setSearchQuery,
 } from "@codemirror/search";
-import { keymap } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { EDITOR_THEME_EXT } from "./lib/themes";
@@ -16,7 +17,7 @@ import {
   useMemo,
   useRef,
 } from "react";
-import { Prec, type Extension } from "@codemirror/state";
+import { EditorState, Prec, type Extension } from "@codemirror/state";
 import { vim } from "@replit/codemirror-vim";
 import {
   buildSharedExtensions,
@@ -34,6 +35,7 @@ import { onKeysChanged } from "@/modules/settings/store";
 import { MediaPreviewPane } from "./MediaPreviewPane";
 import { previewIntentForPath } from "./lib/mediaPreview";
 import { usePreviewFile } from "./lib/usePreviewFile";
+import { localDiagnostics } from "./lib/diagnostics";
 
 export type EditorPaneHandle = {
   setQuery: (q: string) => void;
@@ -65,12 +67,18 @@ function formatBytes(n: number): string {
 
 const CodeEditorPane = forwardRef<EditorPaneHandle, Props>(
   function CodeEditorPane({ path, onDirtyChange, onSaved, onClose }, ref) {
-    const { doc, onChange, save, reload } = useDocument({ path, onDirtyChange });
+    const { doc, onChange, save, reload, loadMore } = useDocument({
+      path,
+      onDirtyChange,
+    });
     const reloadRef = useRef(reload);
     reloadRef.current = reload;
     const cmRef = useRef<ReactCodeMirrorRef>(null);
     const editorThemeId = usePreferencesStore((s) => s.editorTheme);
     const vimMode = usePreferencesStore((s) => s.vimMode);
+    const diagnosticsEnabled = usePreferencesStore(
+      (s) => s.editorDiagnosticsEnabled,
+    );
     const languageRef = useRef<string | null>(null);
     const apiKeyRef = useRef<string | null>(null);
 
@@ -133,6 +141,7 @@ const CodeEditorPane = forwardRef<EditorPaneHandle, Props>(
           close: () => onCloseRef.current?.(),
         })),
         ...buildSharedExtensions(),
+        localDiagnostics({ getPath: () => pathRef.current }),
         languageCompartment.of([]),
         inlineCompletion({
           getPrefs: () => {
@@ -181,6 +190,18 @@ const CodeEditorPane = forwardRef<EditorPaneHandle, Props>(
       [],
     );
 
+    const editorExtensions = useMemo(
+      () =>
+        doc.status === "large"
+          ? [
+              ...extensions,
+              EditorState.readOnly.of(true),
+              EditorView.editable.of(false),
+            ]
+          : extensions,
+      [doc.status, extensions],
+    );
+
     useEffect(() => {
       const view = cmRef.current?.view;
       if (!view) return;
@@ -190,6 +211,18 @@ const CodeEditorPane = forwardRef<EditorPaneHandle, Props>(
         ),
       });
     }, [vimMode]);
+
+    useEffect(() => {
+      const view = cmRef.current?.view;
+      if (view) forceLinting(view);
+    }, [diagnosticsEnabled]);
+
+    useEffect(() => {
+      const view = cmRef.current?.view;
+      if (!view || (doc.status !== "ready" && doc.status !== "large")) return;
+      const id = window.setTimeout(() => forceLinting(view), 0);
+      return () => window.clearTimeout(id);
+    }, [doc.status, doc.status === "ready" || doc.status === "large" ? doc.content : null]);
 
     useEffect(() => {
       let cancelled = false;
@@ -212,6 +245,7 @@ const CodeEditorPane = forwardRef<EditorPaneHandle, Props>(
         view.dispatch({
           effects: languageCompartment.reconfigure(extension),
         });
+        forceLinting(view);
       });
       return () => {
         cancelled = true;
@@ -307,12 +341,30 @@ const CodeEditorPane = forwardRef<EditorPaneHandle, Props>(
 
     return (
       <div className="flex h-full min-h-0 flex-col">
+        {doc.status === "large" && (
+          <div className="flex items-center justify-between border-b border-border/60 px-3 py-1.5 text-[11px] text-muted-foreground">
+            <span>
+              Read-only large file · {formatBytes(doc.size)} · loaded{" "}
+              {formatBytes(doc.nextOffset)}
+            </span>
+            {!doc.eof && (
+              <button
+                type="button"
+                onClick={() => void loadMore()}
+                disabled={doc.loadingMore}
+                className="rounded-md px-2 py-1 text-foreground hover:bg-muted disabled:opacity-50"
+              >
+                {doc.loadingMore ? "Loading…" : "Load more"}
+              </button>
+            )}
+          </div>
+        )}
         <CodeMirror
           ref={cmRef}
           value={doc.content}
           onChange={onChange}
           theme={themeExt}
-          extensions={extensions}
+          extensions={editorExtensions}
           height="100%"
           className="flex-1 min-h-0 overflow-hidden"
           basicSetup={{

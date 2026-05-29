@@ -182,7 +182,7 @@ export function AiComposerProvider({ children }: ProviderProps) {
   const attachFileByPath = async (path: string) => {
     try {
       type ReadResult =
-        | { kind: "text"; content: string; size: number }
+        | { kind: "text"; content: string; size: number; encoding?: string }
         | { kind: "binary"; size: number }
         | { kind: "toolarge"; size: number; limit: number };
       const result = await invoke<ReadResult>("fs_read_file", {

@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { Streamdown } from "streamdown";
 
 type ReadResult =
-  | { kind: "text"; content: string; size: number }
+  | { kind: "text"; content: string; size: number; encoding?: string }
   | { kind: "binary"; size: number }
   | { kind: "toolarge"; size: number; limit: number };
 

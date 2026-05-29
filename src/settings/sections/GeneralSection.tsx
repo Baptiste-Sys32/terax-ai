@@ -22,6 +22,7 @@ import {
   TERMINAL_SCROLLBACK_PRESETS,
   setAgentNotifications,
   setAutostart,
+  setEditorDiagnosticsEnabled,
   setEditorAutoSave,
   setEditorAutoSaveDelay,
   setRestoreWindowState,
@@ -70,6 +71,9 @@ export function GeneralSection() {
   const autostart = usePreferencesStore((s) => s.autostart);
   const restoreWindowState = usePreferencesStore((s) => s.restoreWindowState);
   const vimMode = usePreferencesStore((s) => s.vimMode);
+  const editorDiagnosticsEnabled = usePreferencesStore(
+    (s) => s.editorDiagnosticsEnabled,
+  );
   const editorAutoSave = usePreferencesStore((s) => s.editorAutoSave);
   const editorAutoSaveDelay = usePreferencesStore((s) => s.editorAutoSaveDelay);
   const showHidden = usePreferencesStore((s) => s.showHidden);
@@ -173,6 +177,15 @@ export function GeneralSection() {
           <Switch
             checked={vimMode}
             onCheckedChange={(v) => void setVimMode(v)}
+          />
+        </SettingRow>
+        <SettingRow
+          title="Diagnostics"
+          description="Show lightweight local syntax, bracket, quote, and semicolon warnings."
+        >
+          <Switch
+            checked={editorDiagnosticsEnabled}
+            onCheckedChange={(v) => void setEditorDiagnosticsEnabled(v)}
           />
         </SettingRow>
         <SettingRow
@@ -418,4 +431,3 @@ function AutoSaveDelayInput({
     </SettingRow>
   );
 }
-

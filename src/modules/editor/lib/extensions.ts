@@ -43,7 +43,12 @@ export function buildSharedExtensions(): Extension[] {
         color: "var(--muted-foreground)",
       },
       ".cm-gutter-lint": {
-        width: "0px",
+        color: "var(--muted-foreground)",
+      },
+      ".cm-diagnostic": {
+        backgroundColor: "var(--popover)",
+        color: "var(--popover-foreground)",
+        borderColor: "var(--border)",
       },
       ".cm-gutter": { backgroundColor: "transparent !important" },
       ".cm-lineNumbers .cm-gutterElement": {

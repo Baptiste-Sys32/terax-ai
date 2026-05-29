@@ -4,13 +4,35 @@ import { currentWorkspaceEnv } from "@/modules/workspace";
 import { usePreferencesStore } from "@/modules/settings/preferences";
 
 type ReadResult =
-  | { kind: "text"; content: string; size: number }
+  | { kind: "text"; content: string; size: number; encoding?: TextEncoding }
   | { kind: "binary"; size: number }
   | { kind: "toolarge"; size: number; limit: number };
 
+type TextEncoding = "utf8" | "utf8-bom" | "utf16-le" | "utf16-be";
+
+type TextWindowResult = {
+  content: string;
+  offset: number;
+  nextOffset: number;
+  size: number;
+  encoding: TextEncoding;
+  eof: boolean;
+};
+
 export type DocumentState =
   | { status: "loading" }
-  | { status: "ready"; content: string; size: number }
+  | { status: "ready"; content: string; size: number; encoding?: TextEncoding }
+  | {
+      status: "large";
+      content: string;
+      size: number;
+      limit: number;
+      offset: number;
+      nextOffset: number;
+      encoding: TextEncoding;
+      eof: boolean;
+      loadingMore: boolean;
+    }
   | { status: "binary"; size: number }
   | { status: "toolarge"; size: number; limit: number }
   | { status: "error"; message: string };
@@ -48,6 +70,7 @@ export function useDocument({ path, onDirtyChange }: Options) {
   }, []);
 
   const saveNow = useCallback(async () => {
+    if (doc.status === "large") return;
     const content = bufferRef.current;
     await invoke("fs_write_file", {
       path,
@@ -57,7 +80,32 @@ export function useDocument({ path, onDirtyChange }: Options) {
     });
     savedRef.current = content;
     setDirty(false);
-  }, [path]);
+  }, [doc.status, path]);
+
+  const openLargeWindow = useCallback(
+    async (size: number, limit: number) => {
+      const res = await invoke<TextWindowResult>("fs_read_text_window", {
+        path,
+        offset: 0,
+        workspace: currentWorkspaceEnv(),
+      });
+      savedRef.current = res.content;
+      bufferRef.current = res.content;
+      setDirty(false);
+      setDoc({
+        status: "large",
+        content: res.content,
+        size,
+        limit,
+        offset: res.offset,
+        nextOffset: res.nextOffset,
+        encoding: res.encoding,
+        eof: res.eof,
+        loadingMore: false,
+      });
+    },
+    [path],
+  );
 
   // Notify parent of dirty transitions.
   const onDirtyChangeRef = useRef(onDirtyChange);
@@ -84,14 +132,16 @@ export function useDocument({ path, onDirtyChange }: Options) {
             status: "ready",
             content: res.content,
             size: res.size,
+            encoding: res.encoding,
           });
         } else if (res.kind === "binary") {
           setDoc({ status: "binary", size: res.size });
         } else if (res.kind === "toolarge") {
-          setDoc({
-            status: "toolarge",
-            size: res.size,
-            limit: res.limit,
+          void openLargeWindow(res.size, res.limit).catch((e) => {
+            if (!cancelled) {
+              setDoc({ status: "toolarge", size: res.size, limit: res.limit });
+              console.error("[large-file]", e);
+            }
           });
         }
       })
@@ -102,7 +152,7 @@ export function useDocument({ path, onDirtyChange }: Options) {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, openLargeWindow]);
 
   // Skipped while dirty (never clobber unsaved edits) and when disk already
   // matches the buffer (self-save / duplicate watcher event → no re-render).
@@ -118,25 +168,34 @@ export function useDocument({ path, onDirtyChange }: Options) {
           savedRef.current = res.content;
           bufferRef.current = res.content;
           setDirty(false);
-          setDoc({ status: "ready", content: res.content, size: res.size });
+          setDoc({
+            status: "ready",
+            content: res.content,
+            size: res.size,
+            encoding: res.encoding,
+          });
         } else if (res.kind === "binary") {
           setDoc({ status: "binary", size: res.size });
         } else if (res.kind === "toolarge") {
-          setDoc({ status: "toolarge", size: res.size, limit: res.limit });
+          void openLargeWindow(res.size, res.limit).catch(() =>
+            setDoc({ status: "toolarge", size: res.size, limit: res.limit }),
+          );
         }
       })
       .catch((e) => setDoc({ status: "error", message: String(e) }));
     return true;
-  }, [path]);
+  }, [path, openLargeWindow]);
 
   const save = useCallback(async () => {
     clearAutoSaveTimer();
+    if (doc.status === "large") return;
     if (!dirty) return;
     await saveNow();
-  }, [dirty, clearAutoSaveTimer, saveNow]);
+  }, [doc.status, dirty, clearAutoSaveTimer, saveNow]);
 
   const onChange = useCallback(
     (next: string) => {
+      if (doc.status === "large") return;
       bufferRef.current = next;
       const isDirty = next !== savedRef.current;
       setDirty(isDirty);
@@ -150,10 +209,36 @@ export function useDocument({ path, onDirtyChange }: Options) {
         }, delay);
       }
     },
-    [clearAutoSaveTimer, saveNow],
+    [doc.status, clearAutoSaveTimer, saveNow],
   );
+
+  const loadMore = useCallback(async () => {
+    const current = doc;
+    if (current.status !== "large" || current.eof || current.loadingMore) return;
+    setDoc({ ...current, loadingMore: true });
+    try {
+      const res = await invoke<TextWindowResult>("fs_read_text_window", {
+        path,
+        offset: current.nextOffset,
+        workspace: currentWorkspaceEnv(),
+      });
+      const content = current.content + res.content;
+      savedRef.current = content;
+      bufferRef.current = content;
+      setDoc({
+        ...current,
+        content,
+        nextOffset: res.nextOffset,
+        eof: res.eof,
+        loadingMore: false,
+      });
+    } catch (e) {
+      setDoc({ ...current, loadingMore: false });
+      console.error("[large-file]", e);
+    }
+  }, [doc, path]);
 
   useEffect(() => clearAutoSaveTimer, [path, clearAutoSaveTimer]);
 
-  return { doc, dirty, onChange, save, reload };
+  return { doc, dirty, onChange, save, reload, loadMore };
 }
