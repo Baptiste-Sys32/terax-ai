@@ -9,7 +9,9 @@ use ignore::{WalkBuilder, WalkState};
 use serde::Serialize;
 
 use super::to_canon;
-use crate::modules::workspace::{resolve_path, WorkspaceEnv};
+use crate::modules::workspace::{
+    authorize_existing_dir, resolve_path, WorkspaceEnv, WorkspaceRegistry,
+};
 
 const FILE_SIZE_CAP: u64 = 5 * 1024 * 1024;
 const DEFAULT_MAX_RESULTS: usize = 200;
@@ -51,12 +53,36 @@ pub fn fs_grep(
     case_insensitive: Option<bool>,
     max_results: Option<usize>,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<GrepResponse, String> {
+    fs_grep_impl(
+        pattern,
+        root,
+        glob,
+        case_insensitive,
+        max_results,
+        workspace,
+        Some(&registry),
+    )
+}
+
+pub fn fs_grep_impl(
+    pattern: String,
+    root: String,
+    glob: Option<Vec<String>>,
+    case_insensitive: Option<bool>,
+    max_results: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    registry: Option<&WorkspaceRegistry>,
 ) -> Result<GrepResponse, String> {
     if pattern.is_empty() {
         return Err("empty pattern".into());
     }
     let workspace = WorkspaceEnv::from_option(workspace);
-    let root_path = resolve_path(&root, &workspace);
+    let root_path = match registry {
+        Some(registry) => authorize_existing_dir(registry, &root, &workspace)?,
+        None => resolve_path(&root, &workspace),
+    };
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }
@@ -185,12 +211,26 @@ pub fn fs_glob(
     root: String,
     max_results: Option<usize>,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<GlobResponse, String> {
+    fs_glob_impl(pattern, root, max_results, workspace, Some(&registry))
+}
+
+pub fn fs_glob_impl(
+    pattern: String,
+    root: String,
+    max_results: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    registry: Option<&WorkspaceRegistry>,
 ) -> Result<GlobResponse, String> {
     if pattern.is_empty() {
         return Err("empty pattern".into());
     }
     let workspace = WorkspaceEnv::from_option(workspace);
-    let root_path = resolve_path(&root, &workspace);
+    let root_path = match registry {
+        Some(registry) => authorize_existing_dir(registry, &root, &workspace)?,
+        None => resolve_path(&root, &workspace),
+    };
     if !root_path.is_dir() {
         return Err(format!("not a directory: {root}"));
     }

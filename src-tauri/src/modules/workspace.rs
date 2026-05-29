@@ -69,6 +69,93 @@ impl WorkspaceRegistry {
     }
 }
 
+fn permission_error(path: &Path) -> String {
+    format!(
+        "permission denied: path is outside the authorized workspace: {}",
+        path.display()
+    )
+}
+
+pub fn authorize_existing_path(
+    registry: &WorkspaceRegistry,
+    path: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_path(path, workspace);
+    let canonical = registry
+        .canonicalize_cached(&resolved)
+        .map_err(|e| e.to_string())?;
+    if !registry.is_authorized(&canonical) {
+        return Err(permission_error(&canonical));
+    }
+    Ok(canonical)
+}
+
+pub fn authorize_existing_dir(
+    registry: &WorkspaceRegistry,
+    path: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<PathBuf, String> {
+    let canonical = authorize_existing_path(registry, path, workspace)?;
+    if !canonical.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    Ok(canonical)
+}
+
+pub fn authorize_parent_path(
+    registry: &WorkspaceRegistry,
+    path: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_path(path, workspace);
+    let parent = resolved.parent().ok_or_else(|| "path has no parent".to_string())?;
+    let canonical_parent = registry
+        .canonicalize_cached(parent)
+        .map_err(|e| e.to_string())?;
+    if !registry.is_authorized(&canonical_parent) {
+        return Err(permission_error(&canonical_parent));
+    }
+    Ok(resolved)
+}
+
+pub fn authorize_create_path(
+    registry: &WorkspaceRegistry,
+    path: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_path(path, workspace);
+    let mut ancestor = resolved.as_path();
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| "path has no existing ancestor".to_string())?;
+    }
+    let canonical_ancestor = registry
+        .canonicalize_cached(ancestor)
+        .map_err(|e| e.to_string())?;
+    if !registry.is_authorized(&canonical_ancestor) {
+        return Err(permission_error(&canonical_ancestor));
+    }
+    Ok(resolved)
+}
+
+pub fn authorize_existing_parent_path(
+    registry: &WorkspaceRegistry,
+    path: &str,
+    workspace: &WorkspaceEnv,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_path(path, workspace);
+    let parent = resolved.parent().ok_or_else(|| "path has no parent".to_string())?;
+    let canonical_parent = registry
+        .canonicalize_cached(parent)
+        .map_err(|e| e.to_string())?;
+    if !registry.is_authorized(&canonical_parent) {
+        return Err(permission_error(&canonical_parent));
+    }
+    Ok(resolved)
+}
+
 // `None` means "use bootstrapped default". `Some` is canonicalized to defeat
 // symlink/`..` traversal and must sit under an authorized root.
 pub fn authorize_spawn_cwd(
@@ -749,6 +836,39 @@ mod auth_tests {
         let err = authorize_spawn_cwd(&reg, Some(&s), &WorkspaceEnv::Local)
             .expect_err("symlink-escape must be rejected");
         assert!(err.contains("outside"), "got: {err}");
+    }
+
+    #[test]
+    fn authorize_existing_path_blocks_symlink_escape() {
+        let allowed = tempdir("readroot");
+        let outside = tempdir("readtarget");
+        let secret = outside.join("secret.txt");
+        fs::write(&secret, b"secret").expect("secret");
+        let link = allowed.join("secret-link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink");
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, &link).expect("symlink");
+
+        let reg = WorkspaceRegistry::default();
+        reg.authorize(&allowed).expect("authorize root");
+        let s = link.to_string_lossy().into_owned();
+        let err = authorize_existing_path(&reg, &s, &WorkspaceEnv::Local)
+            .expect_err("symlink-escape must be rejected");
+        assert!(err.contains("outside"), "got: {err}");
+    }
+
+    #[test]
+    fn authorize_create_path_accepts_missing_nested_child() {
+        let allowed = tempdir("create-root");
+        let target = allowed.join("a/b/c");
+        let reg = WorkspaceRegistry::default();
+        reg.authorize(&allowed).expect("authorize root");
+        let s = target.to_string_lossy().into_owned();
+        assert_eq!(
+            authorize_create_path(&reg, &s, &WorkspaceEnv::Local).expect("authorized"),
+            target
+        );
     }
 
     #[test]

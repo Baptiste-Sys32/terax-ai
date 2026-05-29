@@ -2,7 +2,9 @@ use std::time::UNIX_EPOCH;
 
 use serde::Serialize;
 
-use crate::modules::workspace::{resolve_path, WorkspaceEnv};
+use crate::modules::workspace::{
+    authorize_existing_dir, resolve_path, WorkspaceEnv, WorkspaceRegistry,
+};
 
 #[derive(Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,9 +31,22 @@ pub fn fs_read_dir(
     path: String,
     show_hidden: bool,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<Vec<DirEntry>, String> {
+    fs_read_dir_impl(path, show_hidden, workspace, Some(&registry))
+}
+
+pub fn fs_read_dir_impl(
+    path: String,
+    show_hidden: bool,
+    workspace: Option<WorkspaceEnv>,
+    registry: Option<&WorkspaceRegistry>,
 ) -> Result<Vec<DirEntry>, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let root = resolve_path(&path, &workspace);
+    let root = match registry {
+        Some(registry) => authorize_existing_dir(registry, &path, &workspace)?,
+        None => resolve_path(&path, &workspace),
+    };
     let read = std::fs::read_dir(&root).map_err(|e| {
         log::debug!("fs_read_dir({}) failed: {e}", root.display());
         e.to_string()
@@ -104,9 +119,22 @@ pub fn list_subdirs(
     path: String,
     show_hidden: bool,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<Vec<String>, String> {
+    list_subdirs_impl(path, show_hidden, workspace, Some(&registry))
+}
+
+pub fn list_subdirs_impl(
+    path: String,
+    show_hidden: bool,
+    workspace: Option<WorkspaceEnv>,
+    registry: Option<&WorkspaceRegistry>,
 ) -> Result<Vec<String>, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let root = resolve_path(&path, &workspace);
+    let root = match registry {
+        Some(registry) => authorize_existing_dir(registry, &path, &workspace)?,
+        None => resolve_path(&path, &workspace),
+    };
     let read = std::fs::read_dir(&root).map_err(|e| {
         log::debug!("list_subdirs({}) read_dir failed: {e}", root.display());
         e.to_string()

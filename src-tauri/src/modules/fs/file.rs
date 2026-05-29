@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 use std::{fs, io::Write};
@@ -8,10 +8,14 @@ use serde::Serialize;
 use tauri::Emitter;
 use tempfile::NamedTempFile;
 
-use crate::modules::workspace::{resolve_path, WorkspaceEnv};
+use crate::modules::workspace::{
+    authorize_existing_path, authorize_parent_path, resolve_path, WorkspaceEnv, WorkspaceRegistry,
+};
 
 const MAX_READ_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 const MAX_PREVIEW_BYTES: u64 = 50 * 1024 * 1024; // 50 MB
+const DEFAULT_WINDOW_BYTES: usize = 256 * 1024;
+const MAX_WINDOW_BYTES: usize = 1024 * 1024;
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 const PREVIEW_SNIFF_BYTES: usize = 16;
 
@@ -21,6 +25,7 @@ pub enum ReadResult {
     Text {
         content: String,
         size: u64,
+        encoding: TextEncoding,
     },
     Binary {
         size: u64,
@@ -30,6 +35,26 @@ pub enum ReadResult {
         size: u64,
         limit: u64,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TextEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+}
+
+#[derive(Serialize)]
+pub struct TextWindowResult {
+    pub content: String,
+    pub offset: u64,
+    #[serde(rename = "nextOffset")]
+    pub next_offset: u64,
+    pub size: u64,
+    pub encoding: TextEncoding,
+    pub eof: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -89,9 +114,24 @@ pub struct FileStat {
 }
 
 #[tauri::command]
-pub fn fs_read_file(path: String, workspace: Option<WorkspaceEnv>) -> Result<ReadResult, String> {
+pub fn fs_read_file(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<ReadResult, String> {
+    fs_read_file_inner(path, workspace, Some(&registry))
+}
+
+fn fs_read_file_inner(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    registry: Option<&WorkspaceRegistry>,
+) -> Result<ReadResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let p = resolve_path(&path, &workspace);
+    let p = match registry {
+        Some(registry) => authorize_existing_path(registry, &path, &workspace)?,
+        None => resolve_path(&path, &workspace),
+    };
     let meta = std::fs::metadata(&p).map_err(|e| {
         log::debug!("fs_read_file stat({}) failed: {e}", p.display());
         e.to_string()
@@ -110,16 +150,147 @@ pub fn fs_read_file(path: String, workspace: Option<WorkspaceEnv>) -> Result<Rea
         e.to_string()
     })?;
 
-    // Null-byte sniff on the first chunk. Not perfect (misses UTF-16 BOM
-    // cases) but catches the common "this is a PNG" mistake cheaply.
-    let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
-    if bytes[..sniff_len].contains(&0) {
-        return Ok(ReadResult::Binary { size });
+    match decode_text(bytes) {
+        Some((content, encoding)) => Ok(ReadResult::Text {
+            content,
+            size,
+            encoding,
+        }),
+        None => Ok(ReadResult::Binary { size }),
     }
+}
 
-    match String::from_utf8(bytes) {
-        Ok(content) => Ok(ReadResult::Text { content, size }),
-        Err(_) => Ok(ReadResult::Binary { size }),
+#[tauri::command]
+pub fn fs_read_text_window(
+    path: String,
+    offset: Option<u64>,
+    length: Option<usize>,
+    workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<TextWindowResult, String> {
+    let workspace = WorkspaceEnv::from_option(workspace);
+    let p = authorize_existing_path(&registry, &path, &workspace)?;
+    let meta = std::fs::metadata(&p).map_err(|e| {
+        log::debug!("fs_read_text_window stat({}) failed: {e}", p.display());
+        e.to_string()
+    })?;
+    let size = meta.len();
+    let requested = offset.unwrap_or(0).min(size);
+    let len = length
+        .unwrap_or(DEFAULT_WINDOW_BYTES)
+        .clamp(1, MAX_WINDOW_BYTES);
+    let mut f = std::fs::File::open(&p).map_err(|e| e.to_string())?;
+    let mut bom = [0_u8; 3];
+    let bom_n = f.read(&mut bom).map_err(|e| e.to_string())?;
+    let encoding = detect_encoding(&bom[..bom_n]);
+    let offset = align_text_offset(requested, encoding);
+    f.seek(SeekFrom::Start(offset)).map_err(|e| e.to_string())?;
+    let read_len = match encoding {
+        TextEncoding::Utf8 | TextEncoding::Utf8Bom => len.saturating_add(4),
+        TextEncoding::Utf16Le | TextEncoding::Utf16Be => len.saturating_add(2),
+    };
+    let remaining = size.saturating_sub(offset).min(read_len as u64) as usize;
+    let mut bytes = vec![0_u8; remaining];
+    let n = f.read(&mut bytes).map_err(|e| e.to_string())?;
+    bytes.truncate(n);
+    if matches!(encoding, TextEncoding::Utf16Le | TextEncoding::Utf16Be)
+        && bytes.len() % 2 == 1
+    {
+        bytes.pop();
+    }
+    let (content, encoding, consumed) = decode_text_window(bytes, encoding)
+        .ok_or_else(|| "file window is not valid text".to_string())?;
+    let next_offset = offset + consumed as u64;
+    Ok(TextWindowResult {
+        content,
+        offset,
+        next_offset,
+        size,
+        encoding,
+        eof: next_offset >= size,
+    })
+}
+
+fn detect_encoding(bytes: &[u8]) -> TextEncoding {
+    if bytes.starts_with(b"\xef\xbb\xbf") {
+        TextEncoding::Utf8Bom
+    } else if bytes.starts_with(b"\xff\xfe") {
+        TextEncoding::Utf16Le
+    } else if bytes.starts_with(b"\xfe\xff") {
+        TextEncoding::Utf16Be
+    } else {
+        TextEncoding::Utf8
+    }
+}
+
+fn align_text_offset(offset: u64, encoding: TextEncoding) -> u64 {
+    match encoding {
+        TextEncoding::Utf8Bom if offset < 3 => 3,
+        TextEncoding::Utf16Le | TextEncoding::Utf16Be if offset < 2 => 2,
+        TextEncoding::Utf16Le | TextEncoding::Utf16Be if offset > 2 && offset % 2 == 1 => {
+            offset - 1
+        }
+        _ => offset,
+    }
+}
+
+fn decode_utf16(bytes: &[u8], le: bool) -> Option<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let words = bytes.chunks_exact(2).map(|chunk| {
+        if le {
+            u16::from_le_bytes([chunk[0], chunk[1]])
+        } else {
+            u16::from_be_bytes([chunk[0], chunk[1]])
+        }
+    });
+    std::char::decode_utf16(words).collect::<Result<String, _>>().ok()
+}
+
+fn decode_text(bytes: Vec<u8>) -> Option<(String, TextEncoding)> {
+    match detect_encoding(&bytes) {
+        TextEncoding::Utf8Bom => String::from_utf8(bytes.get(3..)?.to_vec())
+            .ok()
+            .map(|s| (s, TextEncoding::Utf8Bom)),
+        TextEncoding::Utf16Le => decode_utf16(bytes.get(2..)?, true)
+            .map(|s| (s, TextEncoding::Utf16Le)),
+        TextEncoding::Utf16Be => decode_utf16(bytes.get(2..)?, false)
+            .map(|s| (s, TextEncoding::Utf16Be)),
+        TextEncoding::Utf8 => {
+            let sniff_len = bytes.len().min(BINARY_SNIFF_BYTES);
+            if bytes[..sniff_len].contains(&0) {
+                return None;
+            }
+            String::from_utf8(bytes).ok().map(|s| (s, TextEncoding::Utf8))
+        }
+    }
+}
+
+fn decode_text_window(
+    bytes: Vec<u8>,
+    encoding: TextEncoding,
+) -> Option<(String, TextEncoding, usize)> {
+    match encoding {
+        TextEncoding::Utf8 | TextEncoding::Utf8Bom => match String::from_utf8(bytes) {
+            Ok(s) => {
+                let len = s.len();
+                Some((s, encoding, len))
+            }
+            Err(e) if e.utf8_error().error_len().is_none() => {
+                let valid = e.utf8_error().valid_up_to();
+                let mut bytes = e.into_bytes();
+                bytes.truncate(valid);
+                String::from_utf8(bytes).ok().map(|s| (s, encoding, valid))
+            }
+            Err(_) => None,
+        },
+        TextEncoding::Utf16Le => {
+            decode_utf16(&bytes, true).map(|s| (s, encoding, bytes.len()))
+        }
+        TextEncoding::Utf16Be => {
+            decode_utf16(&bytes, false).map(|s| (s, encoding, bytes.len()))
+        }
     }
 }
 
@@ -194,9 +365,21 @@ fn read_preview_sniff(path: &Path) -> std::io::Result<Vec<u8>> {
 pub fn fs_read_preview_file(
     path: String,
     workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<PreviewReadResult, String> {
+    fs_read_preview_file_inner(path, workspace, Some(&registry))
+}
+
+fn fs_read_preview_file_inner(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    registry: Option<&WorkspaceRegistry>,
 ) -> Result<PreviewReadResult, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let p = resolve_path(&path, &workspace);
+    let p = match registry {
+        Some(registry) => authorize_existing_path(registry, &path, &workspace)?,
+        None => resolve_path(&path, &workspace),
+    };
     let meta = std::fs::metadata(&p).map_err(|e| {
         log::debug!("fs_read_preview_file stat({}) failed: {e}", p.display());
         e.to_string()
@@ -269,9 +452,10 @@ pub fn fs_write_file(
     workspace: Option<WorkspaceEnv>,
     source: Option<String>,
     app: tauri::AppHandle,
+    registry: tauri::State<'_, WorkspaceRegistry>,
 ) -> Result<(), String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let target = resolve_path(&path, &workspace);
+    let target = authorize_parent_path(&registry, &path, &workspace)?;
     let original_permissions = fs::metadata(&target).ok().map(|m| m.permissions());
     write_atomic(&target, content.as_bytes()).map_err(|e| {
         log::warn!("fs_write_file({}) failed: {e}", target.display());
@@ -293,17 +477,24 @@ pub fn fs_write_file(
 }
 
 #[tauri::command]
-pub fn fs_canonicalize(path: String, workspace: Option<WorkspaceEnv>) -> Result<String, String> {
+pub fn fs_canonicalize(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<String, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let p = resolve_path(&path, &workspace);
-    let canon = std::fs::canonicalize(&p).map_err(|e| e.to_string())?;
+    let canon = authorize_existing_path(&registry, &path, &workspace)?;
     Ok(super::to_canon(&canon))
 }
 
 #[tauri::command]
-pub fn fs_stat(path: String, workspace: Option<WorkspaceEnv>) -> Result<FileStat, String> {
+pub fn fs_stat(
+    path: String,
+    workspace: Option<WorkspaceEnv>,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+) -> Result<FileStat, String> {
     let workspace = WorkspaceEnv::from_option(workspace);
-    let p = resolve_path(&path, &workspace);
+    let p = authorize_existing_path(&registry, &path, &workspace)?;
     let meta = std::fs::metadata(&p).map_err(|e| e.to_string())?;
     let kind = if meta.is_dir() {
         StatKind::Dir
@@ -334,10 +525,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("a.txt");
         std::fs::write(&f, b"hello world").unwrap();
-        match fs_read_file(f.to_string_lossy().into_owned(), None).unwrap() {
-            ReadResult::Text { content, size } => {
+        match fs_read_file_inner(f.to_string_lossy().into_owned(), None, None).unwrap() {
+            ReadResult::Text {
+                content,
+                size,
+                encoding,
+            } => {
                 assert_eq!(content, "hello world");
                 assert_eq!(size, 11);
+                assert_eq!(encoding, TextEncoding::Utf8);
             }
             _ => panic!("expected text"),
         }
@@ -349,7 +545,7 @@ mod tests {
         let f = dir.path().join("a.bin");
         std::fs::write(&f, b"PNG\0\x89image").unwrap();
         assert!(matches!(
-            fs_read_file(f.to_string_lossy().into_owned(), None).unwrap(),
+            fs_read_file_inner(f.to_string_lossy().into_owned(), None, None).unwrap(),
             ReadResult::Binary { .. }
         ));
     }
@@ -359,11 +555,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("a.bin");
         // Invalid UTF-8 with no null byte: must still classify as binary.
-        std::fs::write(&f, [0xff, 0xfe, 0xfd, 0xfc]).unwrap();
+        std::fs::write(&f, [0xff, 0xfd, 0xfc]).unwrap();
         assert!(matches!(
-            fs_read_file(f.to_string_lossy().into_owned(), None).unwrap(),
+            fs_read_file_inner(f.to_string_lossy().into_owned(), None, None).unwrap(),
             ReadResult::Binary { .. }
         ));
+    }
+
+    #[test]
+    fn read_file_decodes_utf8_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("bom.txt");
+        std::fs::write(&f, b"\xef\xbb\xbfhello").unwrap();
+        match fs_read_file_inner(f.to_string_lossy().into_owned(), None, None).unwrap() {
+            ReadResult::Text {
+                content,
+                encoding,
+                ..
+            } => {
+                assert_eq!(content, "hello");
+                assert_eq!(encoding, TextEncoding::Utf8Bom);
+            }
+            _ => panic!("expected text"),
+        }
+    }
+
+    #[test]
+    fn read_file_decodes_utf16_le_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("utf16.txt");
+        std::fs::write(&f, [0xff, 0xfe, b'h', 0, b'i', 0]).unwrap();
+        match fs_read_file_inner(f.to_string_lossy().into_owned(), None, None).unwrap() {
+            ReadResult::Text {
+                content,
+                encoding,
+                ..
+            } => {
+                assert_eq!(content, "hi");
+                assert_eq!(encoding, TextEncoding::Utf16Le);
+            }
+            _ => panic!("expected text"),
+        }
     }
 
     fn classify_bytes(name: &str, bytes: &[u8]) -> Option<PreviewFormat> {
@@ -426,7 +658,7 @@ mod tests {
         let f = dir.path().join("huge.svg");
         let file = std::fs::File::create(&f).unwrap();
         file.set_len(MAX_PREVIEW_BYTES + 1).unwrap();
-        match fs_read_preview_file(f.to_string_lossy().into_owned(), None).unwrap() {
+        match fs_read_preview_file_inner(f.to_string_lossy().into_owned(), None, None).unwrap() {
             PreviewReadResult::TooLarge {
                 size,
                 limit,
