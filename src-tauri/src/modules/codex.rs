@@ -137,7 +137,7 @@ impl Drop for CodexBridge {
 
 #[tauri::command]
 pub async fn codex_status(app: AppHandle) -> CodexStatus {
-    match blocking_codex(app, |app, state| codex_status_blocking(app, state)).await {
+    match blocking_codex(app, codex_status_blocking).await {
         Ok(status) => status,
         Err(detail) => CodexStatus {
             installed: false,
@@ -633,9 +633,8 @@ fn ensure_bridge(
         }
     }
 
-    let bridge = CodexBridge::spawn(app.clone(), bin, profile).map_err(|err| {
+    let bridge = CodexBridge::spawn(app.clone(), bin, profile).inspect_err(|err| {
         set_last_bridge_error(state, err.clone());
-        err
     })?;
     clear_last_bridge_error(state);
     *guard = Some(Arc::clone(&bridge));
