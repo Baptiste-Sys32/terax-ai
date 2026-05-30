@@ -26,10 +26,6 @@ Terax-AI is my fork of Terax, reshaped around a tighter Codex workflow: terminal
 - Local web preview for dev servers and previewable files.
 - AI provider support for OpenAI, Anthropic, Google, xAI, Groq, Cerebras, DeepSeek, Mistral, OpenRouter, OpenAI-compatible endpoints, LM Studio, MLX, and Ollama.
 
-## Direction
-
-This fork is not trying to be a tiny terminal with an AI panel bolted on. The goal is a focused agentic development environment: open a project, give Codex context, edit, preview, test, commit, and keep the loop inside one app.
-
 ## Upstream
 
 Based on Terax by crynta:
